@@ -14,21 +14,23 @@ from colors import Colors
 try:
     from deepgram import DeepgramClient
     from deepgram.listen.v1.socket_client import (
-        ListenV1ControlMessage,
-        ListenV1MediaMessage,
+        ListenV1Results as ListenV1ResultsEvent,
+        ListenV1SpeechStarted as ListenV1SpeechStartedEvent,
+        ListenV1UtteranceEnd as ListenV1UtteranceEndEvent,
+        V1SocketClient,
+        AsyncV1SocketClient,
     )
-    from deepgram.extensions.types.sockets.listen_v1_results_event import (
-        ListenV1ResultsEvent,
-    )
-    from deepgram.extensions.types.sockets.listen_v1_speech_started_event import (
-        ListenV1SpeechStartedEvent,
-    )
-    from deepgram.extensions.types.sockets.listen_v1_utterance_end_event import (
-        ListenV1UtteranceEndEvent,
-    )
+    # ControlMessage / MediaMessage removed in SDK v7 — raw bytes sent directly
+    ListenV1ControlMessage = None
+    ListenV1MediaMessage = None
     DEEPGRAM_AVAILABLE = True
-except Exception:
+except Exception as e:
     DEEPGRAM_AVAILABLE = False
+    ListenV1ResultsEvent = None
+    ListenV1SpeechStartedEvent = None
+    ListenV1UtteranceEndEvent = None
+    ListenV1ControlMessage = None
+    ListenV1MediaMessage = None
 
 try:
     from dotenv import load_dotenv
