@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>100x.inc | Neural Interface</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;500;700;900&display=swap"
+    rel="stylesheet">
+  <style>
+    :root {
+      --neon-primary: #00f0ff;
+      --neon-secondary: #7000ff;
+      --brand-pink: #ff0055;
+      --neon-danger: #ff2a6d;
+      /* New color for reset */
+      --text-main: #ffffff;
+      --text-muted: #8892b0;
+      --bg-dark: #030305;
+      --bg-panel: rgba(10, 12, 16, 0.7);
+      --border-color: rgba(0, 240, 255, 0.15);
+      --glass: blur(20px);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      scrollbar-width: none;
+    }
+
+    ::-webkit-scrollbar {
+      display: none;
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      font-family: 'Inter', sans-serif;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* --- ANIMATED GRID BACKGROUND --- */
+    .grid-bg {
+      position: absolute;
+      width: 200vw;
+      height: 200vh;
+      top: -50%;
+      left: -50%;
+      background-image:
+        linear-gradient(rgba(0, 240, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 240, 255, 0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      transform: perspective(500px) rotateX(60deg);
+      animation: gridMove 20s linear infinite;
+      z-index: 0;
+      pointer-events: none;
+      transition: animation-duration 2s ease;
+    }
+
+    body.session-active .grid-bg {
+      animation-duration: 2s;
+      background-image:
+        linear-gradient(rgba(0, 240, 255, 0.06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 240, 255, 0.06) 1px, transparent 1px);
+    }
+
+    @keyframes gridMove {
+      0% {
+        transform: perspective(500px) rotateX(60deg) translateY(0);
+      }
+
+      100% {
+        transform: perspective(500px) rotateX(60deg) translateY(40px);
+      }
+    }
+
+    /* --- MAIN LAYOUT --- */
+    .app-container {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      height: 100%;
+      width: 100%;
+    }
+
+    /* --- SIDEBAR --- */
+    .sidebar {
+      width: 350px;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border-color);
+      backdrop-filter: var(--glass);
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.4s ease;
+    }
+
+    .sidebar-header {
+      padding: 20px;
+      border-bottom: 1px solid var(--border-color);
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.9rem;
+      letter-spacing: 2px;
+      color: var(--neon-primary);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .logs-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+    }
+
+    .log-entry {
+      padding: 10px;
+      border-left: 2px solid transparent;
+      animation: fadeIn 0.3s ease;
+    }
+
+    .log-entry.user {
+      border-left-color: var(--neon-primary);
+      background: linear-gradient(90deg, rgba(0, 240, 255, 0.05), transparent);
+    }
+
+    .log-entry.assistant {
+      border-left-color: var(--neon-secondary);
+      background: linear-gradient(90deg, rgba(112, 0, 255, 0.05), transparent);
+    }
+
+    .log-role {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      opacity: 0.6;
+      margin-bottom: 4px;
+      display: block;
+    }
+
+    /* --- MAIN STAGE --- */
+    .main-stage {
+      flex: 1;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* HEADER UI */
+    .hud-header {
+      position: absolute;
+      top: 0;
+      width: 100%;
+      padding: 20px 40px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .logo-img {
+      height: 36px;
+      width: auto;
+      display: block;
+      filter: drop-shadow(0 0 8px rgba(255, 0, 85, 0.3));
+    }
+
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      color: var(--neon-primary);
+      border: 1px solid var(--border-color);
+      padding: 5px 12px;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.3);
+    }
+
+    .dot {
+      width: 6px;
+      height: 6px;
+      background: var(--neon-primary);
+      border-radius: 50%;
+    }
+
+    .dot.blink {
+      animation: blink 2s infinite;
+    }
+
+    /* --- THE CORE --- */
+    .core-wrapper {
+      position: relative;
+      width: 340px;
+      height: 340px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    #visualizerCanvas {
+      position: absolute;
+      top: -20%;
+      left: -20%;
+      width: 140%;
+      height: 140%;
+      pointer-events: none;
+      opacity: 0.6;
+      mix-blend-mode: screen;
+      z-index: 1;
+    }
+
+    /* Animated Rings */
+    .core-ring {
+      position: absolute;
+      border-radius: 50%;
+      border: 1px solid transparent;
+      pointer-events: none;
+      transition: all 0.5s ease;
+    }
+
+    .ring-1 {
+      width: 180px;
+      height: 180px;
+      border-top: 2px solid var(--neon-primary);
+      border-right: 2px solid transparent;
+      animation: spin 10s linear infinite;
+      z-index: 5;
+      opacity: 0.6;
+    }
+
+    .ring-2 {
+      width: 240px;
+      height: 240px;
+      border: 1px dashed rgba(255, 255, 255, 0.2);
+      animation: spinReverse 20s linear infinite;
+      z-index: 4;
+    }
+
+    .ring-3 {
+      width: 300px;
+      height: 300px;
+      border-left: 4px solid rgba(0, 240, 255, 0.1);
+      border-right: 4px solid rgba(0, 240, 255, 0.1);
+      animation: spin 30s linear infinite;
+      z-index: 3;
+    }
+
+    /* Core Button */
+    .core-btn {
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      background: radial-gradient(circle, #1a1a1a, #000);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      position: relative;
+      cursor: pointer;
+      z-index: 10;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+      transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+
+    .core-btn::before {
+      content: '';
+      position: absolute;
+      width: 90%;
+      height: 90%;
+      border-radius: 50%;
+      border: 2px solid var(--neon-primary);
+      border-top-color: transparent;
+      border-bottom-color: transparent;
+      animation: spin 4s linear infinite;
+      opacity: 0.3;
+      transition: all 0.3s;
+    }
+
+    .core-icon {
+      color: var(--neon-primary);
+      transition: all 0.3s;
+      filter: drop-shadow(0 0 5px var(--neon-primary));
+    }
+
+    /* Animation States */
+    .core-wrapper.active .core-btn {
+      box-shadow: 0 0 60px var(--neon-primary), inset 0 0 30px var(--neon-primary);
+      border-color: var(--neon-primary);
+      transform: scale(1.05);
+    }
+
+    .core-wrapper.active .ring-1 {
+      border-top-color: var(--neon-primary);
+      border-bottom-color: var(--neon-primary);
+      animation-duration: 1s;
+      opacity: 1;
+      box-shadow: 0 0 15px var(--neon-primary);
+    }
+
+    .core-wrapper.active .ring-2 {
+      border-color: rgba(0, 240, 255, 0.6);
+      animation-duration: 2.5s;
+    }
+
+    .core-wrapper.active .ring-3 {
+      animation-duration: 5s;
+      border-color: rgba(0, 240, 255, 0.3);
+    }
+
+    .core-wrapper.active .core-btn::before {
+      opacity: 1;
+      border-width: 3px;
+      animation-duration: 0.8s;
+    }
+
+    .core-wrapper.speaking .core-btn {
+      box-shadow: 0 0 100px var(--neon-secondary), inset 0 0 40px var(--neon-secondary);
+      border-color: var(--neon-secondary);
+      animation: shockwave 1s infinite;
+    }
+
+    .core-wrapper.speaking .core-icon {
+      color: var(--neon-secondary);
+      filter: drop-shadow(0 0 15px var(--neon-secondary));
+    }
+
+    .core-wrapper.speaking .ring-1 {
+      border-color: var(--neon-secondary);
+      animation-duration: 0.5s;
+      box-shadow: 0 0 25px var(--neon-secondary);
+    }
+
+    /* LIVE TEXT */
+    .live-transcript {
+      margin-top: 40px;
+      text-align: center;
+      width: 80%;
+      max-width: 700px;
+      min-height: 80px;
+      z-index: 5;
+    }
+
+    .transcript-text {
+      font-size: 1.8rem;
+      font-weight: 300;
+      line-height: 1.4;
+      background: linear-gradient(180deg, #fff, #aaa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      opacity: 0;
+      transform: translateY(20px);
+      transition: all 0.4s ease;
+      text-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+    }
+
+    .transcript-text.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .transcript-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      color: var(--neon-primary);
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    /* CONTROLS */
+    .control-dock {
+      position: absolute;
+      bottom: 60px;
+      /* Removed background/border for cleaner "floating" look */
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      z-index: 5;
+    }
+
+    .icon-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: color 0.2s;
+      padding: 5px;
+    }
+
+    .icon-btn:hover {
+      color: #fff;
+    }
+
+    /* --- NEW HEX-PURGE BUTTON --- */
+    .hex-btn {
+      position: relative;
+      width: 50px;
+      height: 50px;
+      background: rgba(255, 255, 255, 0.03);
+      cursor: pointer;
+      border: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+      transition: all 0.3s ease;
+    }
+
+    .hex-btn::before {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      right: 2px;
+      bottom: 2px;
+      background: var(--bg-dark);
+      clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+      z-index: 1;
+    }
+
+    /* Rotating Border */
+    .hex-btn::after {
+      content: '';
+      position: absolute;
+      top: -10px;
+      left: -10px;
+      right: -10px;
+      bottom: -10px;
+      background: conic-gradient(from 0deg, transparent 0%, var(--text-muted) 50%, transparent 100%);
+      animation: spin 4s linear infinite;
+      z-index: 0;
+    }
+
+    .hex-btn:hover::after {
+      background: conic-gradient(from 0deg, transparent 0%, var(--neon-danger) 50%, transparent 100%);
+      animation: spin 1s linear infinite;
+      /* Panic mode speed */
+    }
+
+    .hex-btn svg {
+      position: relative;
+      z-index: 2;
+      color: var(--text-muted);
+      transition: all 0.3s;
+    }
+
+    .hex-btn:hover svg {
+      color: var(--neon-danger);
+      transform: scale(1.1);
+      filter: drop-shadow(0 0 5px var(--neon-danger));
+    }
+
+    .hex-btn:active {
+      transform: scale(0.9);
+    }
+
+    .footer-credits {
+      position: absolute;
+      bottom: 15px;
+      width: 100%;
+      text-align: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      opacity: 0.6;
+      z-index: 5;
+    }
+
+    .footer-credits a {
+      color: var(--neon-primary);
+      text-decoration: none;
+      transition: all 0.2s;
+    }
+
+    .footer-credits a:hover {
+      text-shadow: 0 0 8px var(--neon-primary);
+      color: #fff;
+    }
+
+    .mobile-toggle {
+      display: none;
+    }
+
+    @media (max-width: 768px) {
+      .sidebar {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        z-index: 100;
+        transform: translateX(-100%);
+        width: 85%;
+      }
+
+      .sidebar.open {
+        transform: translateX(0);
+      }
+
+      .mobile-toggle {
+        display: block;
+      }
+
+      .transcript-text {
+        font-size: 1.3rem;
+      }
+
+      .core-wrapper {
+        width: 280px;
+        height: 280px;
+      }
+    }
+
+    @keyframes spin {
+      100% {
+        transform: rotate(360deg);
+      }
+    }
+
+    @keyframes spinReverse {
+      100% {
+        transform: rotate(-360deg);
+      }
+    }
+
+    @keyframes blink {
+      50% {
+        opacity: 0.3;
+      }
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateX(-10px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+
+    @keyframes shockwave {
+      0% {
+        box-shadow: 0 0 0 0 rgba(112, 0, 255, 0.4);
+      }
+
+      70% {
+        box-shadow: 0 0 0 30px rgba(112, 0, 255, 0);
+      }
+
+      100% {
+        box-shadow: 0 0 0 0 rgba(112, 0, 255, 0);
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="grid-bg"></div>
+
+  <div class="app-container">
+
+    <nav class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <span>SESSION LOGS</span>
+        <button class="icon-btn" id="closeSidebarBtn" style="display:none;">✕</button>
+      </div>
+      <div class="logs-container" id="messagesList">
+        <div class="log-entry system">
+          <span class="log-role">SYSTEM</span>
+          Welcome to 100x.inc v1.0. System ready.
+        </div>
+      </div>
+    </nav>
+
+    <main class="main-stage">
+
+      <div class="hud-header">
+        <button class="icon-btn mobile-toggle" id="menuBtn">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 12h18M3 6h18M3 18h18" />
+          </svg>
+        </button>
+
+        <!-- IMAGE LOGO -->
+        <img src="/static/auraspeak_logo.png" alt="Auraspeak Logo" class="logo-img">
+
+        <div class="status-indicator">
+          <div class="dot blink" id="statusDot"></div>
+          <span id="statusText">OFFLINE</span>
+        </div>
+      </div>
+
+      <div class="core-wrapper" id="orbContainer">
+        <canvas id="visualizerCanvas"></canvas>
+        <div class="core-ring ring-1"></div>
+        <div class="core-ring ring-2"></div>
+        <div class="core-ring ring-3"></div>
+
+        <div class="core-btn" id="startBtn">
+          <svg class="core-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
+            <line x1="12" y1="2" x2="12" y2="12"></line>
+          </svg>
+        </div>
+      </div>
+
+      <div class="live-transcript">
+        <div class="transcript-label" id="transcriptLabel">READY</div>
+        <div class="transcript-text" id="liveText">Initialize Sequence</div>
+      </div>
+
+      <div class="control-dock">
+        <!-- NEW HEX-PURGE BUTTON -->
+        <button class="hex-btn" id="resetBtn" title="PURGE SYSTEM CONTEXT">
+          <!-- Brain Reset Icon -->
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path
+              d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z" />
+            <path
+              d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z" />
+            <!-- X Mark Overlay to signify Purge -->
+            <path d="M8 12 h8" stroke-width="2.5" />
+          </svg>
+        </button>
+      </div>
+
+      <div class="footer-credits">
+        Developed by Manish Kumar • <a href="mailto:manish290503@gmail.com">manish290503@gmail.com</a>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+
+</html>
