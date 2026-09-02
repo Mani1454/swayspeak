@@ -11,7 +11,7 @@ Runs efficiently on a **standard laptop or cloud CPU** using the world's fastest
 
 **Just click the link below to start talking:**
 
-👉 **[Launch AuraSpeak Voice Bot](https://manish1454-auraspeak.hf.space/)**
+👉 **[Launch AuraSpeak Voice Bot](https://auraspeak.onrender.com)**
 
 
 
