@@ -11,7 +11,8 @@ Runs efficiently on a **standard laptop or cloud CPU** using the world's fastest
 
 **Just launch the application to start speaking and practicing:**
 
-👉 **[Launch SwaySpeak English Tutor](http://127.0.0.1:8000)**
+👉 **[Live Web App (Render)](https://swayspeak.onrender.com)**  
+👉 **[Local Server (Offline / Development)](http://127.0.0.1:8000)**
 
 ---
 
