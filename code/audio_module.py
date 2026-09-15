@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -80,6 +81,16 @@ class AudioProcessor:
         """
         if self.engine_name != "deepgram":
             return False
+
+        # Strictly isolate conversational_reply if a structured JSON payload was provided
+        if isinstance(text, str) and text.strip().startswith("{") and "conversational_reply" in text:
+            try:
+                parsed_data = json.loads(text.strip())
+                if isinstance(parsed_data, dict) and "conversational_reply" in parsed_data:
+                    logger.info(f"👄🔒 {generation_string} TTS routing guard: Isolated conversational_reply from JSON, ignoring correction fields.")
+                    text = parsed_data["conversational_reply"]
+            except Exception as json_err:
+                logger.debug(f"TTS JSON guard parse ignore: {json_err}")
 
         logger.info(f"👄▶️ {generation_string} Deepgram synthesis starting. Text: {text[:50]}...")
         

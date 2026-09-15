@@ -5,6 +5,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+echo "============================================"
+echo "  SWAYSPEAK - AI English Tutor Starting...  "
+echo "============================================"
+
 if [[ ! -f environment.yml ]]; then
   echo "[ERROR] environment.yml not found in $ROOT_DIR" >&2
   exit 1

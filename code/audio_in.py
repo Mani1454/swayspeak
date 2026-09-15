@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 from typing import Optional, Callable
 
@@ -21,7 +22,7 @@ class AudioInputProcessor:
     It also runs the transcription process in a background task.
     """
 
-    _RESAMPLE_RATIO = 3  # Resample ratio from 48kHz (assumed input) to 16kHz.
+    DEFAULT_TARGET_SAMPLE_RATE = 16000
 
     def __init__(
             self,
@@ -56,8 +57,31 @@ class AudioInputProcessor:
         self.silence_active_callback: Optional[Callable[[bool], None]] = silence_active_callback
         self.interrupted = False # TODO: Consider renaming or clarifying usage (interrupted by user speech?)
 
+        # Dynamic sample rate adaptation for microphone input
+        self.target_sample_rate = self.DEFAULT_TARGET_SAMPLE_RATE
+        self.input_sample_rate = 16000
+        self._resample_up = 1
+        self._resample_down = 1
+        self.set_input_sample_rate(16000)
+
         self._setup_callbacks()
         logger.info(f"👂🚀 AudioInputProcessor initialized using backend: {stt_backend}")
+
+    def set_input_sample_rate(self, sr: int) -> None:
+        """
+        Dynamically updates the input sample rate from the client and recalculates
+        exact rational polyphase resampling factors to target 16kHz with zero pitch or speed distortion.
+        """
+        if not sr or sr <= 0:
+            return
+        self.input_sample_rate = int(sr)
+        divisor = math.gcd(self.target_sample_rate, self.input_sample_rate)
+        self._resample_up = self.target_sample_rate // divisor
+        self._resample_down = self.input_sample_rate // divisor
+        logger.info(
+            f"👂🎚️ AudioInputProcessor input sample rate set to {self.input_sample_rate}Hz "
+            f"(target: {self.target_sample_rate}Hz, rational factors: up={self._resample_up}, down={self._resample_down})"
+        )
 
     def _silence_active_callback(self, is_active: bool) -> None:
         """Internal callback relay for silence detection status."""
@@ -124,9 +148,8 @@ class AudioInputProcessor:
     def process_audio_chunk(self, raw_bytes: bytes) -> np.ndarray:
         """
         Converts raw audio bytes (int16) to a 16kHz 16-bit PCM numpy array.
-
-        The audio is converted to float32 for accurate resampling and then
-        converted back to int16, clipping values outside the valid range.
+        Uses exact rational polyphase resampling matching the client hardware sample rate.
+        If client audio is already 16kHz, audio passes through with zero processing.
 
         Args:
             raw_bytes: Raw audio data assumed to be in int16 format.
@@ -136,17 +159,23 @@ class AudioInputProcessor:
             Returns an array of zeros if the input is silent.
         """
         raw_audio = np.frombuffer(raw_bytes, dtype=np.int16)
+        if len(raw_audio) == 0:
+            return raw_audio
+
+        # Direct pass-through if sample rate already matches target 16kHz
+        if self._resample_up == 1 and self._resample_down == 1:
+            return raw_audio
 
         if np.max(np.abs(raw_audio)) == 0:
             # Calculate expected length after resampling for silence
-            expected_len = int(np.ceil(len(raw_audio) / self._RESAMPLE_RATIO))
+            expected_len = int(np.ceil(len(raw_audio) * self._resample_up / self._resample_down))
             return np.zeros(expected_len, dtype=np.int16)
 
         # Convert to float32 for resampling precision
         audio_float32 = raw_audio.astype(np.float32)
 
-        # Resample using float32 data
-        resampled_float = resample_poly(audio_float32, 1, self._RESAMPLE_RATIO)
+        # Resample using float32 data with exact rational factors
+        resampled_float = resample_poly(audio_float32, self._resample_up, self._resample_down)
 
         # Convert back to int16, clipping to ensure validity
         resampled_int16 = np.clip(resampled_float, -32768, 32767).astype(np.int16)
@@ -169,25 +198,17 @@ class AudioInputProcessor:
         logger.info("👂▶️ Starting audio chunk processing loop.")
         while True:
             try:
-                # Check if the transcription task has permanently failed *before* getting item
-                if self._transcription_failed:
-                    logger.error("👂🛑 Transcription task failed previously. Stopping audio processing.")
-                    break # Stop processing if transcription backend is down
-
-                # Check if the task finished unexpectedly (e.g., cancelled but not failed)
-                # Needs to check self.transcription_task existence as it might be None during shutdown
-                if self.transcription_task and self.transcription_task.done() and not self._transcription_failed:
-                     # Attempt to check exception status if task is done
-                    task_exception = self.transcription_task.exception()
-                    if task_exception and not isinstance(task_exception, asyncio.CancelledError):
-                        # If there was an exception other than CancelledError, treat it as failed.
-                        logger.error(f"👂🛑 Transcription task finished with unexpected error: {task_exception}. Stopping audio processing.", exc_info=task_exception)
-                        self._transcription_failed = True # Mark as failed
-                        break
-                    else:
-                         # Finished cleanly or was cancelled
-                        logger.warning("👂⏹️ Transcription task is no longer running (completed or cancelled). Stopping audio processing.")
-                        break # Stop processing
+                # Check if the transcription task has failed or stopped
+                if self._transcription_failed or (self.transcription_task and self.transcription_task.done()):
+                    # Drain queue to avoid memory buildup while transcription backend is unavailable
+                    try:
+                        audio_data = await asyncio.wait_for(audio_queue.get(), timeout=0.2)
+                        if audio_data is None:
+                            logger.info("👂🔌 Received termination signal for audio processing.")
+                            break
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
 
                 audio_data = await audio_queue.get()
                 if audio_data is None:

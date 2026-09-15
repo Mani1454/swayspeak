@@ -6,25 +6,32 @@ import time
 import os
 from queue import Queue, Empty
 import sys
+import re
 
 # (Make sure real/mock imports are correct)
+from pathlib import Path
 from audio_module import AudioProcessor
 from text_similarity import TextSimilarity
 from text_context import TextContext
 from llm_module import LLM
 from colors import Colors
+from tutor_schema import EnglishTutorResponse, parse_and_validate_tutor_response
 
 # (Logging setup)
 logger = logging.getLogger(__name__)
 
 # (Load system prompt)
+system_prompt_path = Path(__file__).resolve().parent / "system_prompt.txt"
+if not system_prompt_path.exists():
+    system_prompt_path = Path("system_prompt.txt")
+
 try:
-    with open("system_prompt.txt", "r", encoding="utf-8") as f:
+    with open(system_prompt_path, "r", encoding="utf-8") as f:
         system_prompt = f.read().strip()
-    logger.info("🗣️📄 System prompt loaded from file.")
-except FileNotFoundError:
-    logger.warning("🗣️📄 system_prompt.txt not found. Using default system prompt.")
-    system_prompt = "You are a helpful assistant."
+    logger.info(f"🗣️📄 System prompt loaded from {system_prompt_path}.")
+except Exception as e:
+    logger.warning(f"🗣️📄 system_prompt.txt not found ({e}). Using default English Tutor prompt.")
+    system_prompt = "You are SwaySpeak, a supportive English tutor. Output valid JSON with correction_needed, original_sentence, corrected_sentence, explanation, conversational_reply."
 
 
 class PipelineRequest:
@@ -69,6 +76,7 @@ class RunningGeneration:
         self.llm_finished: bool = False
         self.llm_finished_event = threading.Event()
         self.llm_aborted: bool = False
+        self.tutor_response: Optional[EnglishTutorResponse] = None
 
         self.quick_answer: str = ""
         self.quick_answer_provided: bool = False
@@ -316,6 +324,7 @@ class SpeechPipelineManager:
             token_count = 0
 
             try:
+                raw_response_chunks = []
                 for chunk in current_gen.llm_generator:
                     # Check for stop *before* processing the chunk
                     if self.stop_llm_request_event.is_set():
@@ -324,40 +333,39 @@ class SpeechPipelineManager:
                         current_gen.llm_aborted = True
                         break # Exit the generator loop
 
-                    chunk = self.preprocess_chunk(chunk)
                     token_count += 1
-                    current_gen.quick_answer += chunk
+                    raw_response_chunks.append(chunk)
 
                     if token_count == 1:
                         logger.info(f"🗣️🧠⏱️ [Gen {gen_id}] LLM Worker: TTFT: {(time.time() - start_time):.4f}s")
 
-                    # Check for quick answer boundary only if not already provided
-                    if not current_gen.quick_answer_provided:
-                        context, overhang = self.text_context.get_context(current_gen.quick_answer)
-                        if context:
-                            logger.info(f"🗣️🧠✔️ [Gen {gen_id}] LLM Worker:  {Colors.apply('QUICK ANSWER FOUND:').magenta} {context}, overhang: {overhang}")
-                            current_gen.quick_answer = context
-                            if self.on_partial_assistant_text:
-                                self.on_partial_assistant_text(current_gen.quick_answer)
-                            current_gen.quick_answer_overhang = overhang
-                            current_gen.quick_answer_provided = True
-                            self.llm_answer_ready_event.set() # Signal TTS quick worker
-                            break
-                            # Do NOT break here, continue iterating to finish the full LLM response
-
-
                 # Loop finished naturally or broke due to stop request
                 logger.info(f"🗣️🧠🏁 [Gen {gen_id}] LLM Worker: Generator loop finished%s" % (" (Aborted)" if current_gen.llm_aborted else ""))
 
-                # If loop finished naturally and no quick answer was ever found (e.g., short response)
-                # Set the whole thing as the quick answer.
-                if not current_gen.llm_aborted and not current_gen.quick_answer_provided:
-                    logger.info(f"🗣️🧠✔️ [Gen {gen_id}] LLM Worker: No context boundary found, using full response as quick answer.")
-                    # quick_answer already contains the full text
-                    current_gen.quick_answer_provided = True # Mark as provided
+                if not current_gen.llm_aborted:
+                    raw_response = "".join(raw_response_chunks)
+                    logger.info(f"🗣️🧠📦 [Gen {gen_id}] Raw LLM Response: {raw_response[:120]}...")
+                    tutor_response = parse_and_validate_tutor_response(raw_response, user_text=current_gen.text or "")
+                    current_gen.tutor_response = tutor_response
+
+                    logger.info(
+                        f"🗣️🧠✔️ [Gen {gen_id}] Parsed Tutor Response: "
+                        f"correction_needed={tutor_response.correction_needed}, "
+                        f"reply='{tutor_response.conversational_reply}'"
+                    )
+
+                    # TTS Audio Routing: strictly route ONLY conversational_reply to audio synthesis
+                    spoken_reply = self.preprocess_chunk(tutor_response.conversational_reply)
+                    current_gen.quick_answer = spoken_reply
+                    current_gen.quick_answer_provided = True
+                    current_gen.quick_answer_overhang = ""
+                    current_gen.final_answer = ""
+
                     if self.on_partial_assistant_text:
-                        self.on_partial_assistant_text(current_gen.quick_answer)
-                    self.llm_answer_ready_event.set() # Signal TTS quick worker
+                        self.on_partial_assistant_text(spoken_reply)
+
+                    # Signal TTS worker to synthesize conversational_reply
+                    self.llm_answer_ready_event.set()
 
             except Exception as e:
                 logger.exception(f"🗣️🧠💥 [Gen {gen_id}] LLM Worker: Error during generation: {e}")
@@ -448,8 +456,12 @@ class SpeechPipelineManager:
                         logger.warning(f"🗣️🛑💥 {current_gen_id_str} Error calculating similarity: {e}. Assuming different.")
                         similarity = 0.0 # Assume different on error
 
-                    if similarity >= 0.95:
-                        logger.info(f"🗣️🛑🙅 {current_gen_id_str} Text ('{txt[:30]}...') too similar ({similarity:.2f}) to current '{self.running_generation.text[:30] if self.running_generation.text else 'None'}...'. Ignoring.")
+                    words_running = set(re.findall(r'\b\w+\b', (self.running_generation.text or "").lower()))
+                    words_incoming = set(re.findall(r'\b\w+\b', (txt or "").lower()))
+                    word_overlap = len(words_running & words_incoming) / max(len(words_running | words_incoming), 1)
+
+                    if similarity >= 0.80 or word_overlap >= 0.80:
+                        logger.info(f"🗣️🛑🙅 {current_gen_id_str} Text ('{txt[:30]}...') similar enough (sim={similarity:.2f}, overlap={word_overlap:.2f}) to current '{self.running_generation.text[:30] if self.running_generation.text else 'None'}...'. Ignoring.")
                         return False # No abort needed
 
                     # Texts are different enough, initiate abort
@@ -580,6 +592,10 @@ class SpeechPipelineManager:
                     current_gen.tts_quick_finished_event.set() # Signal natural completion
 
                 current_gen.audio_quick_finished = True # Mark quick audio phase as done (even if aborted)
+                # Conversational reply is fully synthesized by quick worker; mark final audio phase complete
+                current_gen.audio_final_finished = True
+                current_gen.tts_final_started = True
+                current_gen.tts_final_finished_event.set()
 
     def _tts_final_inference_worker(self):
         """
@@ -822,21 +838,21 @@ class SpeechPipelineManager:
             is_llm_potentially_active = self.llm_generation_active or self.generator_ready_event.is_set()
             if is_llm_potentially_active:
                 logger.info(f"🗣️🛑🧠❌ {current_gen_id_str} - Stopping LLM...")
+                # Immediately cancel external LLM request so underlying network sockets drop right away
+                if hasattr(self.llm, 'cancel_generation'):
+                    try:
+                        self.llm.cancel_generation()
+                    except Exception as cancel_e:
+                        logger.warning(f"🗣️🛑🧠💥 {current_gen_id_str} Error during external LLM cancel: {cancel_e}")
+
                 self.stop_llm_request_event.set()
                 self.generator_ready_event.set() # Wake up LLM worker if it's waiting
-                stopped = self.stop_llm_finished_event.wait(timeout=5.0) # Wait for LLM worker
+                stopped = self.stop_llm_finished_event.wait(timeout=2.0) # Wait for LLM worker
                 if stopped:
                     logger.info(f"🗣️🛑🧠👍 {current_gen_id_str} LLM stopped confirmation received.")
                     self.stop_llm_finished_event.clear() # Reset for next time
                 else:
                     logger.warning(f"🗣️🛑🧠⏱️ {current_gen_id_str} Timeout waiting for LLM stop confirmation.")
-                # Attempt external cancellation if available
-                if hasattr(self.llm, 'cancel_generation'):
-                    logger.info(f"🗣️🛑🧠🔌 {current_gen_id_str} Calling external LLM cancel_generation.")
-                    try:
-                        self.llm.cancel_generation()
-                    except Exception as cancel_e:
-                         logger.warning(f"🗣️🛑🧠💥 {current_gen_id_str} Error during external LLM cancel: {cancel_e}")
                 self.llm_generation_active = False # Ensure flag is off
                 aborted_something = True
             else:
@@ -900,8 +916,8 @@ class SpeechPipelineManager:
                     try:
                         logger.info(f"🗣️🛑🧠🔌 {current_gen_id_str} Closing LLM generator stream.")
                         current_gen_obj.llm_generator.close()
-                    except Exception as e:
-                        logger.warning(f"🗣️🛑🧠💥 {current_gen_id_str} Error closing LLM generator: {e}")
+                    except (ValueError, Exception) as e:
+                        logger.debug(f"🗣️🛑🧠 Generator close handled: {e}")
                 self.running_generation = None # Clear the reference
             elif self.running_generation is not None and self.running_generation.id != current_gen_obj.id:
                  logger.warning(f"🗣️🛑❓ {current_gen_id_str} Mismatch: self.running_generation changed during abort (now Gen {self.running_generation.id}). Clearing current ref.")

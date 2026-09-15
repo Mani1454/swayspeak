@@ -1,28 +1,28 @@
-## AuraSpeak 🧠🔊
+## SwaySpeak: Interactive AI English Tutor 🗣️💡
 
-A high-performance, ultra-low latency **API-first voice agent** designed for real-time interaction.
-Built for **speed, scalability, and ambient computing** experiences.
+A high-performance, ultra-low latency **interactive English conversation tutor** designed for real-time spoken practice.
+Built for **natural conversation, real-time grammar coaching, and confidence building**.
 
-Runs efficiently on a **standard laptop or cloud CPU** using the world's fastest APIs — no GPU required.
+Runs efficiently on a **standard laptop or cloud CPU** using the world's fastest voice and LLM APIs — no GPU required.
 
 ---
 
 ## 🚀 Try It Now (No Setup Required)
 
-**Just click the link below to start talking:**
+**Just launch the application to start speaking and practicing:**
 
-👉 **[Launch AuraSpeak Voice Bot](https://auraspeak.onrender.com)**
-
-
+👉 **[Launch SwaySpeak English Tutor](http://127.0.0.1:8000)**
 
 ---
 
 ## ⚡ Key Features
 
-* **Zero Setup Needed** — Works instantly in your browser.
-* **Sub-500ms Latency** — It responds almost instantly, like a real person.
-* **Smart Interruption** — You can interrupt it anytime, just like a real conversation.
-* **High-Fidelity Audio** — Crystal clear voice quality.
+* **Spoken Coaching Aloud** — Corrects grammar and phrasing naturally within spoken conversation, explaining native phrasing tips.
+* **Visual English Coach Cards** — Real-time display showing "What You Should Say", sentence improvements, and tips in the UI.
+* **Patient Turn Endpointing** — Natural speech pauses (up to 1.2s) without premature interruptions so you can articulate freely.
+* **Sub-Second Voice Latency** — Streams responses almost instantly like a real human speaking partner.
+* **Smart Natural Interruptions** — Speak anytime or continue thoughts smoothly.
+* **Clean Session Privacy** — Fresh conversation memory per session with one-click context clearing.
 
 ---
 

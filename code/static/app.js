@@ -23,6 +23,10 @@ const menuBtn = document.getElementById("menuBtn");
 const sidebar = document.getElementById("sidebar");
 const closeSidebarBtn = document.getElementById("closeSidebarBtn");
 
+// Chat Input Elements
+const chatInput = document.getElementById("chatInput");
+const sendBtn = document.getElementById("sendBtn");
+
 if (menuBtn) {
   menuBtn.onclick = () => { sidebar.classList.add("open"); closeSidebarBtn.style.display="block"; };
 }
@@ -39,6 +43,18 @@ let ttsWorkletNode = null;
 let isTTSPlaying = false;
 let isRecording = false;
 let ignoreIncomingTTS = false;
+let serverPlayedAudio = false;
+let speechRec = null;
+
+// --- ENGLISH TUTOR STATE & TURN-TAKING ---
+let isAssistantSpeaking = false;
+let isTutorProcessing = false;
+let echoCooldownTimer = null;
+let tutorProcessingWatchdog = null;
+let lastUserEntryElement = null;
+let lastUserText = "";
+let tutorHistory = [];
+let hudToastTimer = null;
 
 // --- VISUALIZER VARIABLES ---
 let analyser = null;
@@ -64,12 +80,81 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
+// --- HUD TOAST HELPERS ---
+function escapeHTML(str) {
+  if (!str) return "";
+  const p = document.createElement("p");
+  p.textContent = str;
+  return p.innerHTML;
+}
+
+function showHUDToast({ corrected, explanation }) {
+  const toast = document.getElementById("hudToast");
+  const correctedEl = document.getElementById("hudToastCorrected");
+  const explanationEl = document.getElementById("hudToastExplanation");
+  if (!toast || !correctedEl || !explanationEl) return;
+
+  correctedEl.textContent = corrected;
+  explanationEl.textContent = explanation || "Practice saying this corrected phrase aloud!";
+
+  toast.style.display = "flex";
+  toast.classList.remove("hide");
+  toast.classList.add("show");
+
+  if (hudToastTimer) clearTimeout(hudToastTimer);
+  hudToastTimer = setTimeout(() => {
+    dismissHUDToast();
+  }, 9000);
+}
+
+function dismissHUDToast() {
+  const toast = document.getElementById("hudToast");
+  if (!toast) return;
+  toast.classList.remove("show");
+  toast.classList.add("hide");
+  setTimeout(() => {
+    toast.style.display = "none";
+  }, 350);
+}
+
+const toastCloseBtn = document.getElementById("hudToastClose");
+if (toastCloseBtn) {
+  toastCloseBtn.onclick = dismissHUDToast;
+}
+
 // --- RESET LOGIC ---
 resetBtn.onclick = () => {
-  messagesList.innerHTML = `<div class="log-entry system"><span class="log-role">SYSTEM</span>Context Cleared.</div>`;
-  updateLiveText("System Reset", "SYSTEM");
+  messagesList.innerHTML = `<div class="log-entry system"><span class="log-role">SYSTEM</span>SwaySpeak English Tutor ready. Context cleared.</div>`;
+  updateLiveText("System Ready", "SWAY TUTOR");
+  lastUserEntryElement = null;
+  lastUserText = "";
+  lastSentSpeech = "";
+  currentSpeechText = "";
+  tutorHistory = [];
+  isTutorProcessing = false;
+  isAssistantSpeaking = false;
+  if (speechSilenceTimer) {
+    clearTimeout(speechSilenceTimer);
+    speechSilenceTimer = null;
+  }
+  if (echoCooldownTimer) {
+    clearTimeout(echoCooldownTimer);
+    echoCooldownTimer = null;
+  }
+  if (window.speechSynthesis) {
+    try { window.speechSynthesis.cancel(); } catch (e) {}
+  }
+  dismissHUDToast();
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: 'clear_history' }));
+  }
+  if (isRecording && speechRec) {
+    try { speechRec.abort(); } catch (e) {}
+    setTimeout(() => {
+      if (isRecording && !isTutorProcessing && !isAssistantSpeaking) {
+        try { speechRec.start(); } catch (e) {}
+      }
+    }, 200);
   }
 };
 
@@ -82,57 +167,268 @@ startBtn.onclick = async () => {
   }
 };
 
-// --- CONNECTION LOGIC ---
+// --- WEBSOCKET CONNECTION & MANAGEMENT ---
+function ensureSocket() {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    socket = new WebSocket(`${wsProto}//${location.host}/ws`);
+
+    socket.onopen = () => {
+      setStatus("ONLINE", "#00f0ff");
+      // Tell backend to clear history so opening another chat starts fresh with zero previous memory
+      socket.send(JSON.stringify({ type: 'clear_history' }));
+      if (audioContext && audioContext.sampleRate) {
+        socket.send(JSON.stringify({
+          type: 'client_audio_config',
+          sample_rate: audioContext.sampleRate
+        }));
+      }
+      tutorHistory = [];
+      lastUserText = "";
+      lastSentSpeech = "";
+      currentSpeechText = "";
+      lastUserEntryElement = null;
+      isTutorProcessing = false;
+      isAssistantSpeaking = false;
+      resolve();
+    };
+
+    socket.onmessage = (evt) => {
+      if (typeof evt.data === "string") {
+        try {
+          const msg = JSON.parse(evt.data);
+          handleJSONMessage(msg);
+        } catch (e) { console.error(e); }
+      }
+    };
+
+    socket.onclose = () => {
+      setStatus("OFFLINE", "#666");
+      if (isRecording) {
+        stopUIState();
+      }
+    };
+
+    socket.onerror = (err) => {
+      console.warn("WebSocket status:", err);
+      setStatus("OFFLINE", "#666");
+    };
+  });
+}
+
+// --- BROWSER SPEECH RECOGNITION (PATIENT TURN-TAKING & ECHO-PROTECTED) ---
+let speechSilenceTimer = null;
+let currentSpeechText = "";
+let lastSentSpeech = "";
+let lastSentTime = 0;
+
+function setupSpeechRecognition() {
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRec) return;
+  try {
+    speechRec = new SpeechRec();
+    speechRec.continuous = true;
+    speechRec.interimResults = true;
+    speechRec.lang = 'en-US';
+
+    function flushSpeech(text) {
+      if (!text || !text.trim()) return;
+      if (isTutorProcessing || isAssistantSpeaking) return;
+
+      // If raw mic PCM audio is streaming to the backend Deepgram STT, DO NOT send duplicate user_text!
+      if (mediaStream && micWorkletNode) {
+        currentSpeechText = "";
+        return;
+      }
+
+      const clean = text.trim();
+      // Prevent duplicate immediate sends of identical utterances within 4s
+      if (clean.toLowerCase() === lastSentSpeech.toLowerCase() && (Date.now() - lastSentTime < 4000)) {
+        return;
+      }
+      lastSentSpeech = clean;
+      lastSentTime = Date.now();
+      currentSpeechText = "";
+      if (speechSilenceTimer) {
+        clearTimeout(speechSilenceTimer);
+        speechSilenceTimer = null;
+      }
+
+      // Lock recognition so mic won't pick up speaker sound while tutor processes/speaks
+      isTutorProcessing = true;
+      if (speechRec) {
+        try { speechRec.abort(); } catch (e) {}
+      }
+
+      sendUserText(clean);
+    }
+
+    speechRec.onresult = (event) => {
+      // If server-side PCM streaming to Deepgram is active, let Deepgram handle STT
+      if (mediaStream && micWorkletNode) {
+        return;
+      }
+      // Mute/ignore recognition while the tutor is thinking, generating, or speaking
+      if (isTutorProcessing || isAssistantSpeaking) {
+        return;
+      }
+
+      let transcript = '';
+      for (let i = 0; i < event.results.length; ++i) {
+        transcript += event.results[i][0].transcript;
+      }
+
+      transcript = transcript.trim();
+      if (!transcript) return;
+
+      currentSpeechText = transcript;
+      updateLiveText(currentSpeechText, "YOU (SPEAKING)");
+
+      // Patient Silence Debouncer: Wait 2.0s (2000ms) of silence!
+      // Gives English learners plenty of time to pause, think, and articulate without getting cut off mid-sentence!
+      if (speechSilenceTimer) clearTimeout(speechSilenceTimer);
+      speechSilenceTimer = setTimeout(() => {
+        if (currentSpeechText && isRecording && !isTutorProcessing && !isAssistantSpeaking) {
+          flushSpeech(currentSpeechText);
+        }
+      }, 2000);
+    };
+
+    speechRec.onend = () => {
+      // ONLY restart recognition if audio streaming is NOT active, user is recording, and tutor is not speaking
+      if (isRecording && !isTutorProcessing && !isAssistantSpeaking && !(mediaStream && micWorkletNode)) {
+        try {
+          speechRec.start();
+        } catch (e) {}
+      }
+    };
+
+    speechRec.onerror = (err) => {
+      if (err.error !== 'no-speech' && err.error !== 'aborted') {
+        console.warn("Speech recognition notice:", err);
+      }
+    };
+  } catch (e) {
+    console.warn("Speech recognition not available:", e);
+  }
+}
+
+// --- SEND USER TEXT TO TUTOR (VOICE OR CHAT INPUT) ---
+function sendUserText(text) {
+  if (!text || !text.trim()) return;
+  const clean = text.trim();
+
+  // Reset states for the new turn
+  serverPlayedAudio = false;
+  isTutorProcessing = true;
+  if (speechRec) {
+    try { speechRec.abort(); } catch (e) {}
+  }
+
+  // Safety watchdog: reset lock after 12s in case of unexpected delays
+  if (tutorProcessingWatchdog) clearTimeout(tutorProcessingWatchdog);
+  tutorProcessingWatchdog = setTimeout(() => {
+    if (isTutorProcessing && !isAssistantSpeaking) {
+      console.warn("Tutor response timeout - resetting processing lock");
+      isTutorProcessing = false;
+      if (isRecording && speechRec) {
+        try { speechRec.start(); } catch (e) {}
+      }
+      updateLiveText("SwaySpeak Tutor Listening...", "SWAY TUTOR");
+    }
+  }, 12000);
+
+  lastUserText = clean;
+  lastUserEntryElement = addLogEntry("user", clean);
+  updateLiveText(clean, "YOU");
+
+  ensureSocket().then(() => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "user_text", text: clean }));
+      updateLiveText("SwaySpeak Analyzing...", "SWAY TUTOR");
+    }
+  });
+}
+
+function handleChatSubmit() {
+  if (!chatInput) return;
+  const val = chatInput.value;
+  if (!val || !val.trim()) return;
+  if (isTutorProcessing || isAssistantSpeaking) return;
+  chatInput.value = "";
+  sendUserText(val);
+}
+
+if (chatInput) {
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleChatSubmit();
+    }
+  });
+}
+if (sendBtn) {
+  sendBtn.addEventListener("click", handleChatSubmit);
+}
+
+// --- CONNECTION LIFECYCLE ---
 async function startConnection() {
-  if (socket && socket.readyState === WebSocket.OPEN) return;
-  
-  updateLiveText("Initializing Uplink...", "SYSTEM");
+  ensureSocket().catch(() => {});
+
+  isRecording = true;
+  setStatus("ONLINE", "#00f0ff");
+  updateLiveText("SwaySpeak Tutor Listening...", "SWAY TUTOR");
   orbContainer.classList.add("active");
   document.body.classList.add("session-active");
-  
-  const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  socket = new WebSocket(`${wsProto}//${location.host}/ws`);
 
-  socket.onopen = async () => {
-    isRecording = true;
-    setStatus("ONLINE", "#00f0ff");
-    updateLiveText("100x.inc Listening...", "SYSTEM"); // FIXED NAME
-    
-    await startAudioSystem();
-    
+  // Start raw PCM microphone streaming to backend Deepgram STT
+  startAudioSystem().then(() => {
     visualizerCanvas.style.opacity = "0.8";
     drawVisualizer();
-  };
-
-  socket.onmessage = (evt) => {
-    if (typeof evt.data === "string") {
-      try {
-        const msg = JSON.parse(evt.data);
-        handleJSONMessage(msg);
-      } catch (e) { console.error(e); }
+    // Raw mic streaming to Deepgram is active; ensure browser speechRec is stopped
+    if (speechRec) {
+      try { speechRec.abort(); } catch (e) {}
     }
-  };
-
-  socket.onclose = () => {
-    stopUIState();
-    setStatus("OFFLINE", "#666");
-  };
-
-  socket.onerror = (err) => {
-    console.error(err);
-    stopUIState();
-    updateLiveText("Connection Failure", "ERROR");
-  };
+  }).catch((audioErr) => {
+    console.warn("Audio system fallback to Web Speech API:", audioErr);
+    // If audio worklet / getUserMedia failed, fallback to browser speech recognition
+    if (speechRec) {
+      try { speechRec.start(); } catch (e) {}
+    }
+  });
 }
 
 function stopConnection() {
-  if (socket) socket.close();
+  if (speechSilenceTimer) {
+    clearTimeout(speechSilenceTimer);
+    speechSilenceTimer = null;
+  }
+  if (echoCooldownTimer) {
+    clearTimeout(echoCooldownTimer);
+    echoCooldownTimer = null;
+  }
+  if (tutorProcessingWatchdog) {
+    clearTimeout(tutorProcessingWatchdog);
+    tutorProcessingWatchdog = null;
+  }
+  if (speechRec) {
+    try { speechRec.abort(); } catch (e) {}
+  }
+  if (window.speechSynthesis) {
+    try { window.speechSynthesis.cancel(); } catch (e) {}
+  }
   cleanupAudio();
   stopUIState();
 }
 
 function stopUIState() {
   isRecording = false;
+  isAssistantSpeaking = false;
+  isTutorProcessing = false;
+  currentSpeechText = "";
   orbContainer.classList.remove("active");
   orbContainer.classList.remove("speaking");
   document.body.classList.remove("session-active");
@@ -175,15 +471,29 @@ async function startAudioSystem() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        sampleRate: { ideal: 24000 },
         channelCount: 1,
         echoCancellation: true,
-        noiseSuppression: true
+        noiseSuppression: true,
+        autoGainControl: true
       }
     });
     mediaStream = stream;
     
-    if (!audioContext) audioContext = new AudioContext();
+    if (!audioContext) {
+      try {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      } catch (e) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+    }
+
+    // Sync client sample rate with server so rational resampling perfectly preserves pitch & speed
+    if (socket && socket.readyState === WebSocket.OPEN && audioContext.sampleRate) {
+      socket.send(JSON.stringify({
+        type: 'client_audio_config',
+        sample_rate: audioContext.sampleRate
+      }));
+    }
     
     analyser = audioContext.createAnalyser();
     analyser.fftSize = 512;
@@ -209,9 +519,15 @@ async function startAudioSystem() {
 
     await audioContext.audioWorklet.addModule('/static/ttsPlaybackProcessor.js');
     ttsWorkletNode = new AudioWorkletNode(audioContext, 'tts-playback-processor');
+    ttsWorkletNode.port.postMessage({ type: 'setSourceSampleRate', sampleRate: 24000 });
     ttsWorkletNode.port.onmessage = (event) => {
       const { type } = event.data;
       if (type === 'ttsPlaybackStarted') {
+        isAssistantSpeaking = true;
+        isTutorProcessing = true;
+        if (speechRec) {
+          try { speechRec.abort(); } catch (e) {}
+        }
         if (!isTTSPlaying && socket) {
           isTTSPlaying = true;
           orbContainer.classList.add("speaking");
@@ -222,7 +538,21 @@ async function startAudioSystem() {
           isTTSPlaying = false;
           ignoreIncomingTTS = false;
           orbContainer.classList.remove("speaking");
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'tts_stop' }));
+          }
         }
+        // Room echo cooldown: Wait 600ms after speaker audio finishes before re-enabling mic
+        if (echoCooldownTimer) clearTimeout(echoCooldownTimer);
+        echoCooldownTimer = setTimeout(() => {
+          isAssistantSpeaking = false;
+          isTutorProcessing = false;
+          currentSpeechText = "";
+          if (isRecording && speechRec) {
+            try { speechRec.start(); } catch (e) {}
+          }
+          updateLiveText("SwaySpeak Tutor Listening...", "SWAY TUTOR");
+        }, 600);
       }
     };
     ttsWorkletNode.connect(audioContext.destination);
@@ -268,9 +598,10 @@ function updateLiveText(text, label) {
 function addLogEntry(role, content) {
   const div = document.createElement("div");
   div.className = `log-entry ${role}`;
-  div.innerHTML = `<span class="log-role">${role.toUpperCase()}</span>${content}`;
+  div.innerHTML = `<span class="log-role">${role === "assistant" ? "SWAY TUTOR" : role.toUpperCase()}</span><div class="log-text">${escapeHTML(content)}</div>`;
   messagesList.appendChild(div);
   messagesList.scrollTop = messagesList.scrollHeight;
+  return div;
 }
 
 function handleJSONMessage({ type, content }) {
@@ -278,23 +609,119 @@ function handleJSONMessage({ type, content }) {
     updateLiveText(content, "USER INPUT");
   }
   else if (type === "final_user_request") {
-    addLogEntry("user", content);
-    updateLiveText("Processing...", "100x.inc"); // FIXED NAME
+    serverPlayedAudio = false;
+    // Avoid duplicate log entry if we already displayed this text upon sending
+    if (!lastUserEntryElement || lastUserText.toLowerCase().trim() !== content.toLowerCase().trim()) {
+      lastUserText = content;
+      lastUserEntryElement = addLogEntry("user", content);
+    }
+    updateLiveText("Listening & Analyzing...", "SWAY TUTOR");
   }
   else if (type === "partial_assistant_answer") {
-    updateLiveText(content, "100x.inc"); // FIXED NAME
+    updateLiveText(content, "SWAY TUTOR");
   }
   else if (type === "final_assistant_answer") {
-    addLogEntry("assistant", content);
+    if (tutorProcessingWatchdog) {
+      clearTimeout(tutorProcessingWatchdog);
+      tutorProcessingWatchdog = null;
+    }
+    // Ingest and manage the structured JSON payload
+    let payload = content;
+    if (typeof content === "string") {
+      try {
+        payload = JSON.parse(content);
+      } catch (e) {
+        payload = {
+          correction_needed: false,
+          original_sentence: lastUserText,
+          corrected_sentence: "",
+          explanation: "",
+          conversational_reply: content
+        };
+      }
+    }
+
+    // Update frontend state
+    tutorHistory.push({
+      user: lastUserText,
+      payload: payload,
+      timestamp: Date.now()
+    });
+
+    // Coaching feedback is delivered in spoken language (audio & dialogue) instead of chat cards
+    const hasFeedback = payload.corrected_sentence || payload.explanation || payload.correction_needed;
+    if (hasFeedback && payload.correction_needed && payload.explanation && !payload.explanation.includes("fluent")) {
+      // Show subtle floating toast notification without cluttering chat transcript
+      showHUDToast({
+        corrected: payload.corrected_sentence || payload.original_sentence || lastUserText,
+        explanation: payload.explanation
+      });
+    }
+
+    // Render tutor conversational reply in session logs and live transcript
+    const replyText = payload.conversational_reply || (typeof content === "string" ? content : "");
+    if (replyText) {
+      addLogEntry("assistant", replyText);
+      updateLiveText(replyText, "SWAY TUTOR");
+
+      // Spoken voice playback: If server-side TTS didn't produce chunks (e.g. mock key), speak using browser Web Speech API
+      if (!serverPlayedAudio && window.speechSynthesis) {
+        try {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(replyText);
+          utterance.lang = 'en-US';
+          utterance.rate = 1.0;
+          utterance.onstart = () => {
+            isAssistantSpeaking = true;
+            isTutorProcessing = true;
+            orbContainer.classList.add("speaking");
+            if (speechRec) {
+              try { speechRec.abort(); } catch (e) {}
+            }
+          };
+          const handleSpeechEnd = () => {
+            orbContainer.classList.remove("speaking");
+            // Room echo cooldown: Wait 600ms after speaker audio finishes before re-enabling mic
+            if (echoCooldownTimer) clearTimeout(echoCooldownTimer);
+            echoCooldownTimer = setTimeout(() => {
+              isAssistantSpeaking = false;
+              isTutorProcessing = false;
+              currentSpeechText = "";
+              if (isRecording && speechRec) {
+                try { speechRec.start(); } catch (e) {}
+              }
+              updateLiveText("SwaySpeak Tutor Listening...", "SWAY TUTOR");
+            }, 600);
+          };
+          utterance.onend = handleSpeechEnd;
+          utterance.onerror = handleSpeechEnd;
+          window.speechSynthesis.speak(utterance);
+        } catch (synthErr) {
+          console.warn("SpeechSynthesis error:", synthErr);
+          isAssistantSpeaking = false;
+          isTutorProcessing = false;
+        }
+      } else if (!serverPlayedAudio) {
+        isAssistantSpeaking = false;
+        isTutorProcessing = false;
+        if (isRecording && speechRec) {
+          try { speechRec.start(); } catch (e) {}
+        }
+      }
+    }
   }
   else if (type === "tts_chunk") {
+    serverPlayedAudio = true;
     if (ignoreIncomingTTS || !ttsWorkletNode) return;
     const int16 = base64ToInt16Array(content);
     ttsWorkletNode.port.postMessage(int16);
   }
   else if (type === "stop_tts") {
     if (ttsWorkletNode) ttsWorkletNode.port.postMessage({ type: "clear" });
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
     isTTSPlaying = false;
+    isAssistantSpeaking = false;
+    isTutorProcessing = false;
     ignoreIncomingTTS = true;
     orbContainer.classList.remove("speaking");
     socket.send(JSON.stringify({ type: 'tts_stop' }));
@@ -353,4 +780,23 @@ function drawVisualizer() {
   canvasCtx.strokeStyle = "rgba(255, 255, 255, 0.05)";
   canvasCtx.lineWidth = 1;
   canvasCtx.stroke();
+}
+
+// --- INITIALIZE ON LOAD ---
+function preloadWorkletScripts() {
+  try {
+    fetch('/static/pcmWorkletProcessor.js').catch(() => {});
+    fetch('/static/ttsPlaybackProcessor.js').catch(() => {});
+  } catch (e) {}
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  ensureSocket().catch(() => {});
+  setupSpeechRecognition();
+  preloadWorkletScripts();
+});
+if (document.readyState !== "loading") {
+  ensureSocket().catch(() => {});
+  setupSpeechRecognition();
+  preloadWorkletScripts();
 }

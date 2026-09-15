@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: auraspeak
+    name: swayspeak
     runtime: docker
     plan: free
     envVars:
@@ -17,8 +17,8 @@ services:
       - key: TTS_ENGINE
         value: deepgram
       - key: DEEPGRAM_STT_MODEL
-        value: nova-2
+        value: nova-3
       - key: DEEPGRAM_TTS_MODEL
-        value: aura-2-pluto-en
+        value: aura-asteria-en
       - key: DEEPGRAM_TTS_SAMPLE_RATE
-        value: "48000"
+        value: "24000"

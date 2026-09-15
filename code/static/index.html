@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>100x.inc | Neural Interface</title>
+  <title>SwaySpeak | Interactive AI English Tutor</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
@@ -170,10 +170,10 @@
     }
 
     .logo-img {
-      height: 36px;
+      height: 38px;
       width: auto;
       display: block;
-      filter: drop-shadow(0 0 8px rgba(255, 0, 85, 0.3));
+      filter: drop-shadow(0 0 10px rgba(0, 240, 255, 0.4));
     }
 
     .status-indicator {
@@ -569,6 +569,237 @@
         box-shadow: 0 0 0 0 rgba(112, 0, 255, 0);
       }
     }
+
+    /* --- GRAMMAR FEEDBACK CARD (INLINE IN USER MESSAGE) --- */
+    .grammar-card {
+      margin-top: 10px;
+      padding: 10px 14px;
+      background: linear-gradient(135deg, rgba(255, 170, 0, 0.08), rgba(255, 0, 85, 0.03));
+      border: 1px solid rgba(255, 170, 0, 0.35);
+      border-radius: 6px;
+      font-family: 'JetBrains Mono', monospace;
+      animation: fadeIn 0.3s ease;
+      box-shadow: 0 4px 16px rgba(255, 170, 0, 0.08);
+    }
+
+    .grammar-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid rgba(255, 170, 0, 0.15);
+    }
+
+    .grammar-badge {
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+      color: #ffaa00;
+      text-transform: uppercase;
+    }
+
+    .grammar-pill {
+      font-size: 0.6rem;
+      background: rgba(255, 170, 0, 0.2);
+      color: #ffaa00;
+      padding: 2px 6px;
+      border-radius: 3px;
+      letter-spacing: 0.5px;
+    }
+
+    .grammar-card-body {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 0.78rem;
+    }
+
+    .grammar-row {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      line-height: 1.4;
+    }
+
+    .grammar-tag {
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      opacity: 0.6;
+      min-width: 55px;
+    }
+
+    .original-row .grammar-tag {
+      color: var(--neon-danger);
+    }
+
+    .original-text {
+      color: #ff7788;
+      text-decoration: line-through;
+      opacity: 0.85;
+    }
+
+    .corrected-row .grammar-tag {
+      color: var(--neon-primary);
+    }
+
+    .corrected-text {
+      color: var(--neon-primary);
+      font-weight: 600;
+      text-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
+    }
+
+    .explanation-row .grammar-tag {
+      color: #ffd166;
+    }
+
+    .explanation-text {
+      color: #ddd;
+      font-size: 0.74rem;
+    }
+
+    /* --- HUD TOAST NOTIFICATION --- */
+    .hud-toast {
+      position: absolute;
+      top: 75px;
+      left: 50%;
+      transform: translateX(-50%);
+      max-width: 90%;
+      width: 500px;
+      background: rgba(15, 17, 23, 0.92);
+      border: 1px solid rgba(255, 170, 0, 0.45);
+      border-radius: 8px;
+      padding: 12px 16px;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 24px rgba(255, 170, 0, 0.2);
+      z-index: 100;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      animation: slideDownToast 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: opacity 0.3s ease, transform 0.3s ease;
+    }
+
+    .hud-toast.hide {
+      opacity: 0;
+      transform: translate(-50%, -20px);
+    }
+
+    @keyframes slideDownToast {
+      from {
+        opacity: 0;
+        transform: translate(-50%, -20px);
+      }
+      to {
+        opacity: 1;
+        transform: translate(-50%, 0);
+      }
+    }
+
+    .hud-toast-icon {
+      font-size: 1.2rem;
+      line-height: 1;
+      padding-top: 2px;
+    }
+
+    .hud-toast-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .hud-toast-title {
+      font-size: 0.65rem;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: #ffaa00;
+      font-weight: 700;
+    }
+
+    .hud-toast-corrected {
+      color: var(--neon-primary);
+      font-size: 0.85rem;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+
+    .hud-toast-explanation {
+      color: #bbb;
+      font-size: 0.72rem;
+      line-height: 1.35;
+    }
+
+    .hud-toast-close {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 0.9rem;
+      padding: 2px 6px;
+      transition: color 0.2s;
+    }
+
+    .hud-toast-close:hover {
+      color: #fff;
+    }
+
+    /* CHAT INPUT BAR */
+    .chat-input-wrapper {
+      margin-top: 14px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      width: min(560px, 90%);
+      background: rgba(10, 12, 16, 0.75);
+      border: 1px solid var(--border-color);
+      border-radius: 28px;
+      padding: 5px 14px;
+      backdrop-filter: var(--glass);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+      transition: border-color 0.3s, box-shadow 0.3s;
+      z-index: 10;
+    }
+
+    .chat-input-wrapper:focus-within {
+      border-color: var(--neon-primary);
+      box-shadow: 0 0 15px rgba(0, 240, 255, 0.25);
+    }
+
+    .chat-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text-main);
+      font-family: 'Inter', sans-serif;
+      font-size: 0.9rem;
+      padding: 8px 12px;
+    }
+
+    .chat-input::placeholder {
+      color: var(--text-muted);
+      opacity: 0.7;
+    }
+
+    .send-btn {
+      background: transparent;
+      border: none;
+      color: var(--neon-primary);
+      cursor: pointer;
+      padding: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      transition: transform 0.2s, background 0.2s;
+    }
+
+    .send-btn:hover {
+      background: rgba(0, 240, 255, 0.15);
+      transform: scale(1.1);
+    }
   </style>
 </head>
 
@@ -586,12 +817,23 @@
       <div class="logs-container" id="messagesList">
         <div class="log-entry system">
           <span class="log-role">SYSTEM</span>
-          Welcome to 100x.inc v1.0. System ready.
+          Welcome to SwaySpeak English Tutor. Tap the glowing core to start practicing your spoken English!
         </div>
       </div>
     </nav>
 
     <main class="main-stage">
+
+      <!-- HUD TOAST FOR CONDITIONAL GRAMMAR COACHING -->
+      <div id="hudToast" class="hud-toast" style="display: none;">
+        <div class="hud-toast-icon">💡</div>
+        <div class="hud-toast-content">
+          <div class="hud-toast-title">Grammar Tip</div>
+          <div class="hud-toast-corrected" id="hudToastCorrected"></div>
+          <div class="hud-toast-explanation" id="hudToastExplanation"></div>
+        </div>
+        <button class="hud-toast-close" id="hudToastClose" title="Dismiss">✕</button>
+      </div>
 
       <div class="hud-header">
         <button class="icon-btn mobile-toggle" id="menuBtn">
@@ -601,7 +843,7 @@
         </button>
 
         <!-- IMAGE LOGO -->
-        <img src="/static/auraspeak_logo.png" alt="Auraspeak Logo" class="logo-img">
+        <img src="/static/swayspeak_logo.png?v=2" alt="SwaySpeak Logo" class="logo-img">
 
         <div class="status-indicator">
           <div class="dot blink" id="statusDot"></div>
@@ -641,6 +883,17 @@
               d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z" />
             <!-- X Mark Overlay to signify Purge -->
             <path d="M8 12 h8" stroke-width="2.5" />
+          </svg>
+        </button>
+      </div>
+
+      <!-- TEXT CHAT INPUT BAR FOR TUTOR PRACTICE -->
+      <div class="chat-input-wrapper">
+        <input type="text" id="chatInput" class="chat-input" placeholder="Type a sentence to practice grammar... (Press Enter)" autocomplete="off" />
+        <button id="sendBtn" class="send-btn" title="Send to English Tutor">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
           </svg>
         </button>
       </div>

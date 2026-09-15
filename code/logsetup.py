@@ -76,7 +76,13 @@ def setup_logging(level: int = logging.INFO) -> None:
         formatter = CustomTimeFormatter(log_format)
 
         # 2. Create a handler (e.g., StreamHandler to log to console)
-        handler = logging.StreamHandler()
+        import sys
+        if hasattr(sys.stdout, "reconfigure"):
+            try:
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+        handler = logging.StreamHandler(sys.stdout)
 
         # 3. Set the custom formatter on the handler
         handler.setFormatter(formatter)

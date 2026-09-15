@@ -48,7 +48,7 @@ except Exception:
 # --- Backend selection ---
 STT_BACKEND = os.getenv("STT_BACKEND", "deepgram").lower()
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-DEEPGRAM_STT_MODEL = os.getenv("DEEPGRAM_STT_MODEL", "nova-2")
+DEEPGRAM_STT_MODEL = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
 DEEPGRAM_LANGUAGE = os.getenv("DEEPGRAM_LANGUAGE")  # Optional override; defaults to source_language
 
 SAMPLE_RATE: int = 16000
@@ -100,6 +100,9 @@ class DeepgramTranscriptionProcessor:
         self.model = DEEPGRAM_STT_MODEL
         self.language = DEEPGRAM_LANGUAGE or self.source_language
 
+        self._accumulated_parts = []
+        self._last_final_time = 0.0
+
         self._client: Optional["DeepgramClient"] = None
         self._socket_ctx = None
         self._socket = None
@@ -121,7 +124,7 @@ class DeepgramTranscriptionProcessor:
         if self._socket is not None:
             return
         self._ensure_client()
-        logger.info("🎤🔌 Opening Deepgram streaming connection (model=%s, language=%s)", self.model, self.language)
+        logger.info("🎤🔌 Opening Deepgram streaming connection (model=%s, language=%s, endpointing=1200ms)", self.model, self.language)
         ctx = self._client.listen.v1.connect(
             model=self.model,
             language=self.language,
@@ -130,7 +133,10 @@ class DeepgramTranscriptionProcessor:
             interim_results="true",
             smart_format="true",
             punctuate="true",
+            numerals="true",
             vad_events="true",
+            endpointing="1200",
+            utterance_end_ms="1200",
         )
         self._socket_ctx = ctx
         self._socket = ctx.__enter__()
@@ -141,8 +147,8 @@ class DeepgramTranscriptionProcessor:
             if self._socket:
                 self._stop_keepalive()
                 try:
-                    # Ask Deepgram to end the stream cleanly
-                    self._socket.send_control(ListenV1ControlMessage(type="CloseStream"))
+                    if hasattr(self._socket, "send_close_stream"):
+                        self._socket.send_close_stream()
                 except Exception:
                     pass
                 try:
@@ -157,6 +163,27 @@ class DeepgramTranscriptionProcessor:
                     pass
                 self._socket_ctx = None
 
+    def _finalize_turn(self, final_text: str = "") -> None:
+        """
+        Dispatches the finalized complete user utterance when speech_final or silence occurs.
+        """
+        if not final_text and self._accumulated_parts:
+            final_text = " ".join(self._accumulated_parts).strip()
+        self._accumulated_parts.clear()
+
+        if not final_text:
+            return
+
+        logger.info(f"👂✅ Deepgram complete turn finalized: {final_text}")
+        self.final_transcription = final_text
+        if self.before_final_sentence:
+            try:
+                self.before_final_sentence(None, final_text)
+            except Exception as e:
+                logger.warning(f"👂⚠️ Error in before_final_sentence callback: {e}")
+        if self.full_transcription_callback:
+            self.full_transcription_callback(final_text)
+
     def _handle_result(self, message: ListenV1ResultsEvent):
         if not message.channel or not message.channel.alternatives:
             return
@@ -165,23 +192,35 @@ class DeepgramTranscriptionProcessor:
         if not transcript:
             return
 
-        self.realtime_text = transcript
-        if message.is_final or message.speech_final:
-            logger.info(f"👂✅ Deepgram final: {transcript}")
-            self.final_transcription = transcript
-            if self.before_final_sentence:
-                try:
-                    self.before_final_sentence(None, transcript)
-                except Exception as e:
-                    logger.warning(f"👂⚠️ Error in before_final_sentence callback: {e}")
-            if self.full_transcription_callback:
-                self.full_transcription_callback(transcript)
+        is_final = bool(getattr(message, "is_final", False))
+        speech_final = bool(getattr(message, "speech_final", False))
+
+        if is_final:
+            clean_part = transcript.strip()
+            if clean_part:
+                if not self._accumulated_parts or self._accumulated_parts[-1] != clean_part:
+                    self._accumulated_parts.append(clean_part)
+            full_text = " ".join(self._accumulated_parts).strip()
+            self.realtime_text = full_text
+            self._last_final_time = time.time()
+
+            if speech_final:
+                # User finished speaking and pause threshold satisfied
+                self._finalize_turn(full_text)
+            else:
+                logger.info(f"👂📝 Deepgram chunk final (in-progress): {clean_part} | Rolling total: '{full_text}'")
+                if self.realtime_transcription_callback:
+                    self.realtime_transcription_callback(full_text)
+                if self.potential_full_transcription_callback:
+                    self.potential_full_transcription_callback(full_text)
         else:
-            logger.info(f"👂📝 Deepgram partial: {transcript}")
+            interim_full = " ".join(self._accumulated_parts + [transcript.strip()]).strip()
+            self.realtime_text = interim_full
+            logger.debug(f"👂📝 Deepgram interim partial: {interim_full}")
             if self.realtime_transcription_callback:
-                self.realtime_transcription_callback(transcript)
+                self.realtime_transcription_callback(interim_full)
             if self.potential_full_transcription_callback:
-                self.potential_full_transcription_callback(transcript)
+                self.potential_full_transcription_callback(interim_full)
 
     # --- Public API mirroring the local recorder-backed processor ---
     def transcribe_loop(self) -> None:
@@ -213,6 +252,8 @@ class DeepgramTranscriptionProcessor:
                     elif isinstance(message, ListenV1UtteranceEndEvent):
                         if self.silence_active_callback:
                             self.silence_active_callback(True)
+                        if self._accumulated_parts:
+                            self._finalize_turn()
                         if self.potential_full_transcription_abort_callback:
                             self.potential_full_transcription_abort_callback()
             except websockets.exceptions.ConnectionClosedError as e:
@@ -238,9 +279,12 @@ class DeepgramTranscriptionProcessor:
             logger.error(f"👂💥 Failed to feed audio to Deepgram: {e}", exc_info=True)
 
     def abort_generation(self) -> None:
+        self._accumulated_parts.clear()
+        self.realtime_text = None
         try:
-            if self._socket:
-                self._socket.send_control(ListenV1ControlMessage(type="Finalize"))
+            with self._socket_lock:
+                if self._socket and hasattr(self._socket, "send_finalize"):
+                    self._socket.send_finalize()
         except Exception:
             pass
 
@@ -265,11 +309,11 @@ class DeepgramTranscriptionProcessor:
         while not self._keepalive_stop.is_set() and not self.shutdown_performed:
             try:
                 with self._socket_lock:
-                    if self._socket:
-                        self._socket.send_control(ListenV1ControlMessage(type="KeepAlive"))
+                    if self._socket and hasattr(self._socket, "send_keep_alive"):
+                        self._socket.send_keep_alive()
             except Exception:
                 pass
-            self._keepalive_stop.wait(timeout=10.0)
+            self._keepalive_stop.wait(timeout=8.0)
 
     def _start_keepalive(self):
         self._keepalive_stop.clear()

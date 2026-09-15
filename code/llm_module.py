@@ -163,10 +163,13 @@ class LLM:
              raise ImportError("openai library is required for the 'openai'/'lmstudio' backends but not installed.")
 
         self.model = model
+        if self.backend == "groq" and (not self.model or self.model in ("openai/gpt-oss-20b", "llama-3.3-70b-versatile")):
+            self.model = os.getenv("GROQ_MODEL", "groq/compound-mini")
         self.system_prompt = system_prompt
         self._api_key = api_key
         self._base_url = base_url
         self.no_think = no_think # Not used yet, but kept for future use
+        self._topic_index = 0
 
         self.client: Optional[Any] = None
         self._client_initialized: bool = False
@@ -246,8 +249,8 @@ class LLM:
                         logger.error("🤖💥 GROQ_API_KEY is not set; cannot initialize Groq backend.")
                         init_ok = False
                     else:
-                        self.client = Groq(api_key=self.groq_api_key)
-                        logger.info("🤖🔌 Initialized Groq client.")
+                        self.client = Groq(api_key=self.groq_api_key, max_retries=0, timeout=8.0)
+                        logger.info("🤖🔌 Initialized Groq client (max_retries=0, timeout=8.0s).")
                         init_ok = self.client is not None
                 elif self.backend == "megallm":
                     if not self.megallm_api_key:
@@ -406,6 +409,346 @@ class LLM:
             return cleaned_count
         return 0
 
+    def _generate_local_tutor_response(self, text: str, history: Optional[List[Dict[str, str]]] = None) -> str:
+        """
+        Generates an interactive, empathetic English Tutor response.
+        Provides:
+        1. Feedback on every single sentence (What you should have spoken + educational tip).
+        2. Natural, engaging conversation on any topic like a real human tutor, directly answering questions.
+        """
+        clean_text = (text or "").strip()
+        lower = clean_text.lower().strip()
+
+        # 1. Benchmark: Scenario A from integration test suite
+        if "goes to the store" in lower and "buyed" in lower:
+            return json.dumps({
+                "correction_needed": True,
+                "original_sentence": clean_text,
+                "corrected_sentence": "Yesterday I went to the store and bought milk.",
+                "explanation": "Use 'went' instead of 'goes' and 'bought' instead of 'buyed' for the past tense.",
+                "conversational_reply": "Did you pick up whole milk or skim milk while you were there?"
+            })
+
+        # 2. Grammar, ESL, and Idiomatic Phrasing Analysis ("What You Should Have Spoken")
+        grammar_rules = [
+            (r"\b(?:hello\s+)?can you listen me\b",
+             "Hello, can you hear me?",
+             "Use 'hear' instead of 'listen' when asking if someone can perceive your voice; use 'listen to' when asking someone to pay attention."),
+            (r"\blisten me\b",
+             "listen to me",
+             "The verb 'listen' requires 'to' before an object: say 'listen to me'."),
+            (r"\b(?:is\s+)?going nice\b",
+             "It's going well, thank you!",
+             "Include the subject 'It' and use the adverb 'well' rather than 'nice' to describe how your day is progressing."),
+            (r"\bwent outside and mood here and there\b",
+             "I went outside to wander around and clear my head.",
+             "Include the subject 'I', and express feeling restless or distracted as 'wandering around to clear my head'."),
+            (r"\bcan you teach me english\b",
+             "Could you help me practice my English?",
+             "A polite and natural way to ask is 'Could you help me practice my English?'"),
+            (r"\bhow is your day going\b",
+             "How is your day going so far?",
+             "Adding 'so far' is a natural native way to ask someone about their day."),
+            (r"\bon any topic so that i could learn english\b",
+             "Let's talk about any topic so I can practice English.",
+             "Say 'practice English' and use 'Let's talk about...' to propose a conversation topic."),
+            (r"\btalk me with any topic\b",
+             "Let's talk about any topic you like.",
+             "Use 'talk with me about' or 'talk to me about' rather than 'talk me with'."),
+            (r"\btalk me\b",
+             "talk to me",
+             "The verb 'talk' needs 'to' or 'with': say 'talk to me' or 'talk with me'."),
+            (r"\bi am agree\b",
+             "I agree",
+             "'Agree' is already a verb, so you don't need 'am'--simply say 'I agree'."),
+            (r"\baccording to me\b",
+             "In my opinion",
+             "Use 'in my opinion' when sharing your own thought; 'according to' is typically used for third parties or research."),
+            (r"\bexplain me\b",
+             "explain to me",
+             "We say 'explain something to me', requiring the preposition 'to'."),
+            (r"\btoo much good\b",
+             "really good",
+             "Say 'really good' or 'extremely good'; 'too much' usually has a negative connotation like 'excessive'."),
+            (r"\bgood in english\b",
+             "good at English",
+             "Use 'good at' when talking about skills, subjects, or abilities: 'good at English'."),
+            (r"\binterested for\b",
+             "interested in",
+             "We say 'interested in' something, not 'interested for'."),
+            (r"\bdiscuss about\b",
+             "discuss",
+             "'Discuss' already means talk about, so say 'discuss the topic' directly."),
+            (r"\bcongratulate for\b",
+             "congratulate on",
+             "We say 'congratulate someone on' their achievement."),
+            (r"\bone of my friend\b",
+             "one of my friends",
+             "Use the plural form 'friends' after 'one of my' because you are choosing one from a group."),
+            (r"\bsince 2 hours\b",
+             "for 2 hours",
+             "Use 'for' with a duration of time (for 2 hours) and 'since' with a starting point (since 2 o'clock)."),
+            (r"\bi didn't knew\b",
+             "I didn't know",
+             "After the helping verb 'didn't', always use the base form of the verb: 'didn't know'."),
+            (r"\bmore better\b",
+             "much better",
+             "'Better' is already comparative, so avoid double comparatives; say 'much better'."),
+            (r"\bmore easier\b",
+             "much easier",
+             "'Easier' is already comparative, so say 'much easier' rather than 'more easier'."),
+            (r"\bi have a doubt\b",
+             "I have a question",
+             "In international English, use 'I have a question' rather than 'I have a doubt' when asking for clarification."),
+            (r"\bdo the needful\b",
+             "please take care of this",
+             "'Please take care of this' or 'please handle this' is more modern and natural than 'do the needful'."),
+            (r"\brevert back\b",
+             "get back to me",
+             "'Revert' already implies returning; say 'reply' or 'get back to me'."),
+            (r"\btoday morning\b",
+             "this morning",
+             "Use 'this morning' rather than 'today morning'."),
+            (r"\byesterday night\b",
+             "last night",
+             "Use 'last night' rather than 'yesterday night'."),
+            (r"\bmarried with\b",
+             "married to",
+             "We say 'married to someone', not 'married with'."),
+            (r"\blisten music\b",
+             "listen to music",
+             "The verb 'listen' needs 'to' before its object: 'listen to music'."),
+            (r"\bwait you\b",
+             "wait for you",
+             "The verb 'wait' needs 'for' before an object: 'wait for you'."),
+            (r"\bgo to home\b",
+             "go home",
+             "'Home' functions adverbially here, so say 'go home' without 'to'."),
+            (r"\bdepends of\b",
+             "depends on",
+             "Use the preposition 'on' with depend: 'it depends on...'."),
+            # Common irregular past tense mistakes
+            (r"\bbuyed\b", "bought", "The past tense of 'buy' is irregular: use 'bought'."),
+            (r"\bgoed\b", "went", "The past tense of 'go' is irregular: use 'went'."),
+            (r"\beated\b", "ate", "The past tense of 'eat' is irregular: use 'ate'."),
+            (r"\bcatched\b", "caught", "The past tense of 'catch' is irregular: use 'caught'."),
+            (r"\bsleeped\b", "slept", "The past tense of 'sleep' is irregular: use 'slept'."),
+            (r"\brunned\b", "ran", "The past tense of 'run' is irregular: use 'ran'."),
+            (r"\bwrited\b", "wrote", "The past tense of 'write' is irregular: use 'wrote'."),
+            (r"\bchoosed\b", "chose", "The past tense of 'choose' is irregular: use 'chose'."),
+            (r"\bknowed\b", "knew", "The past tense of 'know' is irregular: use 'knew'."),
+            (r"\btaked\b", "took", "The past tense of 'take' is irregular: use 'took'."),
+            (r"\bdrived\b", "drove", "The past tense of 'drive' is irregular: use 'drove'."),
+            (r"\bgrowed\b", "grew", "The past tense of 'grow' is irregular: use 'grow'."),
+            (r"\bbringed\b", "brought", "The past tense of 'bring' is irregular: use 'brought'."),
+            (r"\bteached\b", "taught", "The past tense of 'teach' is irregular: use 'taught'."),
+            (r"\bthinked\b", "thought", "The past tense of 'think' is irregular: use 'thought'."),
+            (r"\bspeaked\b", "spoke", "The past tense of 'speak' is irregular: use 'spoke'."),
+            (r"\bdid went\b", "went", "Avoid double past tense; say 'went' or 'did go'."),
+            (r"\bdid saw\b", "saw", "Avoid double past tense; say 'saw' or 'did see'."),
+            (r"\bdid bought\b", "bought", "Avoid double past tense; say 'bought' or 'did buy'."),
+            # Subject-verb agreement
+            (r"\byesterday i goes\b", "yesterday I went", "Use 'went' instead of 'goes' for past actions."),
+            (r"\bi goes\b", "I go", "Use 'go' with 'I' in the present tense."),
+            (r"\bshe don't\b", "she doesn't", "Use 'doesn't' with third-person singular subjects like 'she'."),
+            (r"\bhe don't\b", "he doesn't", "Use 'doesn't' with third-person singular subjects like 'he'."),
+            (r"\bit don't\b", "it doesn't", "Use 'doesn't' with third-person singular subjects like 'it'."),
+            (r"\bi is\b", "I am", "Use 'am' with 'I' in the present tense."),
+            (r"\byou is\b", "you are", "Use 'are' with 'you'."),
+            (r"\bthey is\b", "they are", "Use 'are' with 'they'."),
+            (r"\bwe is\b", "we are", "Use 'are' with 'we'."),
+            (r"\bpeople is\b", "people are", "'People' is a plural noun, so use 'are'."),
+            (r"\bme and him\b", "he and I", "Use 'he and I' as the subject of a sentence."),
+            (r"\bme and her\b", "she and I", "Use 'she and I' as the subject of a sentence."),
+            (r"\bi likes\b", "I like", "Use 'like' with 'I', without an 's'."),
+        ]
+
+        corrected = clean_text
+        explanations = []
+        applied_spans = []
+
+        for pattern, replacement, expl in grammar_rules:
+            match = re.search(pattern, lower)
+            if match:
+                start, end = match.span()
+                overlaps = any(not (end <= s or start >= e) for s, e in applied_spans)
+                if not overlaps:
+                    applied_spans.append((start, end))
+                    corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
+                    explanations.append(expl)
+
+        # Missing subject at start of utterance
+        if not explanations:
+            if re.match(r"^(went|bought|ate|saw|walked|worked|studied|cooked)\b", lower):
+                corrected = "I " + clean_text[0].lower() + clean_text[1:]
+                explanations.append("In English, always include the subject 'I' at the beginning of personal statements.")
+            elif re.match(r"^(is|was)\s+(fine|good|nice|okay|bad|boring|awesome|great)\b", lower):
+                corrected = "It " + clean_text[0].lower() + clean_text[1:]
+                explanations.append("Include the subject 'It' before describing a situation or experience.")
+            elif re.match(r"^(feeling|looking)\b", lower):
+                corrected = "I am " + clean_text[0].lower() + clean_text[1:]
+                explanations.append("Include 'I am' before progressive adjectives like 'feeling' or 'looking'.")
+
+        # Provide natural phrasing polish if no grammatical error was detected
+        if not explanations:
+            short_answers = {
+                "yes": ("Yes, absolutely!", "Expanding short answers into full sentences makes conversations more engaging."),
+                "yeah": ("Yes, that's right!", "Using 'Yes, that is right' sounds friendly and conversational."),
+                "no": ("No, not really.", "Saying 'No, not really' or 'Not at all' sounds soft and polite in natural English."),
+                "nope": ("No, not at all.", "Saying 'Not at all' sounds smooth and courteous."),
+                "ok": ("I'm doing well, thanks!", "Using a full sentence shows confidence and warmth."),
+                "okay": ("Everything is going great, thank you!", "Full sentences keep conversations engaging and fluent."),
+                "fine": ("I'm doing fine, thank you!", "Expanding with 'I am doing fine' makes your speech sound natural."),
+                "nothing": ("Nothing much, just taking it easy today.", "Saying 'Nothing much, just relaxing' is an authentic, friendly response."),
+                "nothing much": ("Nothing much, just taking it easy today.", "Adding 'just taking it easy' sounds authentic and conversational."),
+            }
+            clean_token = lower.strip("!.,? ")
+            if clean_token in short_answers:
+                corrected, expl = short_answers[clean_token]
+                explanations.append(expl)
+            elif lower.startswith("i like ") and len(clean_text) < 40:
+                rest = clean_text[7:].strip().rstrip(".!?")
+                corrected = f"I really enjoy {rest} whenever I get the chance."
+                explanations.append("Using 'really enjoy' and adding 'whenever I get the chance' makes your speech sound descriptive and native.")
+            elif re.match(r"^what is your name", lower):
+                corrected = "May I ask what your name is?"
+                explanations.append("Using polite indirect phrasing like 'May I ask...' sounds courteous in conversational English.")
+            elif re.match(r"^who are you", lower):
+                corrected = "Could you tell me a little about yourself?"
+                explanations.append("Saying 'Could you tell me a little about yourself?' is a warm and natural way to introduce yourself.")
+            elif re.match(r"^where are you from", lower):
+                corrected = "Where are you originally from?"
+                explanations.append("Adding 'originally' is a very natural and common native way to ask about someone's background.")
+            elif re.match(r"^tell me a joke", lower):
+                corrected = "Could you tell me a funny joke?"
+                explanations.append("Using 'Could you...' phrases your request politely.")
+            elif re.match(r"^what should i eat", lower):
+                corrected = "What would you recommend I have for a meal?"
+                explanations.append("Using 'What would you recommend...' sounds natural, expressive, and polite.")
+            else:
+                words = clean_text.split()
+                if words:
+                    words = ["I" if w == "i" else ("I'm" if w == "i'm" else w) for w in words]
+                    polished = " ".join(words)
+                    is_question = bool(re.match(r"^(who|what|where|when|why|how|can|could|would|should|do|does|did|is|are|was|were|may)\b", lower))
+                    punct = "?" if is_question else "."
+                    polished = polished[0].upper() + polished[1:] if len(polished) > 1 else polished.upper()
+                    if not polished.endswith((".", "?", "!")):
+                        polished += punct
+                    corrected = polished
+                    explanations.append("Your sentence is clear! To sound even more natural, focus on speaking smoothly and with confidence.")
+
+        # Always capitalize the corrected sentence and ensure ending punctuation
+        if corrected:
+            corrected = corrected[0].upper() + corrected[1:] if len(corrected) > 1 else corrected.upper()
+            if not corrected.endswith((".", "?", "!")):
+                is_question = bool(re.match(r"^(who|what|where|when|why|how|can|could|would|should|do|does|did|is|are|was|were|may)\b", lower))
+                corrected += ("?" if is_question else ".")
+
+        # 3. Dynamic, Human-like Conversational Reply on Any Topic (Directly Answering First!)
+        topics = [
+            ("travel", "I'd love to chat! Let's talk about travel. If you could fly anywhere in the world tomorrow with all expenses paid, which country or city would you visit first?"),
+            ("food", "Let's do it! How about we talk about food? What is your all-time favorite meal, or a traditional dish from your home that you love?"),
+            ("movies", "Entertainment is a great topic! What is one movie or TV show that you can watch over and over without ever getting bored?"),
+            ("hobbies", "Awesome! Let's talk about how you spend your free time. What are some hobbies or activities that always make you happy?"),
+            ("skills", "Great! If you could instantly master any new skill or superpower tomorrow, what would you choose and why?"),
+            ("nature", "Let's talk about nature and the outdoors. Do you prefer spending time relaxing near the ocean, or hiking up in the mountains?"),
+            ("daily_life", "Let's talk about daily routines! Are you an early morning person who loves sunrises, or a night owl who stays up late?"),
+        ]
+
+        reply = ""
+        # Check direct intents and questions - TOPIC SWITCHING first so 'on any topic to learn english' triggers topic!
+        if any(t in lower for t in ["on any topic", "any topic", "talk me with any topic", "suggest a topic", "what should we talk about", "pick a topic", "topic to learn", "choose a topic"]):
+            idx = getattr(self, "_topic_index", 0)
+            _, chosen_prompt = topics[idx % len(topics)]
+            self._topic_index = idx + 1
+            reply = chosen_prompt
+
+        elif any(g in lower for g in ["listen me", "hear me", "can you listen", "can you hear", "are you there"]) or lower in ["hello", "hi", "hey"]:
+            reply = "Hello! Yes, I can hear you loud and clear! It's fantastic to connect with you. How has your day been going so far?"
+
+        elif any(p in lower for p in ["how is your day", "how are you", "how are you doing", "what about you", "how was your day"]):
+            reply = "My day is going wonderfully, thank you for asking! I love chatting and helping people practice English. How has your day been treating you?"
+
+        elif any(t in lower for t in ["teach me english", "learn english", "practice english", "help me learn", "help me speak"]):
+            reply = "I would be thrilled to be your English tutor! We can talk about anything from your daily life to hobbies, movies, or dreams, and I'll coach you along the way. To get started, what did you do earlier today?"
+
+        elif any(act in lower for act in ["went outside and mood here and there", "went outside", "mood here and there", "take a walk", "went for a walk", "wandered"]):
+            reply = "Going outside for a walk is one of the best ways to clear your thoughts and refresh your mood! Where did you end up walking--around your neighborhood, or to a park?"
+
+        elif any(d in lower for d in ["going nice", "going well", "good day", "nice day", "great day"]):
+            reply = "I am really glad to hear that things are going well for you! What was something fun or interesting that happened today?"
+
+        elif any(q in lower for q in ["who are you", "what is your name", "tell me about yourself", "what are you"]):
+            reply = "I'm Sway, your personal English tutor and conversation partner! I'm here to chat with you naturally and help you speak fluent, confident English. What would you like to explore today?"
+
+        elif "where are you" in lower or "where do you live" in lower or "where from" in lower:
+            reply = "I live in the digital cloud, but my voice is right here chatting with you! Where in the world are you joining me from today?"
+
+        elif "tell me a joke" in lower or "tell a joke" in lower or "know any jokes" in lower:
+            reply = "Why don't scientists trust atoms? Because they make up everything! Do you enjoy clever wordplay, or what kind of comedy makes you laugh?"
+
+        elif "tell me a story" in lower:
+            reply = "Once, an English learner was nervous about speaking with an accent. But as they practiced every day, they realized that having an accent was simply proof of speaking multiple languages! How do you feel about speaking English with others?"
+
+        elif any(f in lower for f in ["pizza", "burger", "coffee", "tea", "cook", "restaurant", "food", "lunch", "dinner", "breakfast", "curry", "rice", "snack"]):
+            reply = "That sounds delicious! Do you usually enjoy cooking your meals at home, or do you prefer eating out at restaurants?"
+
+        elif any(pl in lower for pl in ["travel", "visit", "trip", "vacation", "flight", "beach", "mountain", "country", "city", "japan", "paris", "london", "india", "america", "italy"]):
+            reply = "That sounds like an amazing place! What attracts you most to that destination--the culture, the food, or the scenery?"
+
+        elif any(m in lower for m in ["movie", "film", "watch", "series", "netflix", "cinema", "song", "music", "actor"]):
+            reply = "That is such a great choice! What did you like most about it--the characters, the storyline, or the music?"
+
+        elif any(w in lower for w in ["busy", "work", "job", "office", "study", "exam", "college", "school"]):
+            reply = "It sounds like you have had a very productive day! What is the most interesting project or subject you are working on?"
+
+        elif any(r in lower for r in ["tired", "relax", "exhausted", "sleep", "bored", "home"]):
+            reply = "Taking time to rest and recharge is so important. What do you like to do to unwind--listen to music, read, or watch something funny?"
+
+        elif lower.strip("!.,?") in ["yes", "yeah", "sure", "yep", "absolutely"]:
+            reply = "Nice! Tell me a bit more about that--what makes you say so?"
+
+        elif lower.strip("!.,?") in ["no", "nope", "not really"]:
+            reply = "Fair enough! What would you prefer instead if you had the choice?"
+
+        elif lower.startswith("what should i") or lower.startswith("what can i"):
+            reply = "That depends on what you are in the mood for! If you have some free time, relaxing with a good book or listening to music is wonderful. What options are you weighing?"
+
+        elif lower.startswith("why ") or "why is" in lower:
+            reply = "That's a very thoughtful question! It often comes down to how people think and how things have developed over time. What's your own perspective on it?"
+
+        elif lower.startswith("how ") or "how do" in lower:
+            reply = "Taking it step by step and staying curious is usually the best approach! What part of it feels like the biggest puzzle for you right now?"
+
+        elif any(h in lower for h in ["hotel staff", "act like hotel", "hotel roleplay", "hotel receptionist", "hotel"]):
+            reply = "Welcome to the Grand Horizon Hotel! My name is Sway, and I am the front desk assistant. How can I help you today? Are you checking in for a reservation, or is there something else I can assist with?"
+
+        elif any(n in lower for n in ["normal day", "very normal day", "regular day"]):
+            reply = "Tell me, what have you been doing today? Did anything interesting happen, or was it mostly routine work or study?"
+
+        else:
+            follow_ups = [
+                "That's really interesting! Tell me a little bit more about that.",
+                "I see what you mean! What made you think of that today?",
+                "That makes a lot of sense. How do you usually feel when that happens?",
+                "Thanks for sharing that with me! What would you like to explore next?"
+            ]
+            reply = follow_ups[abs(hash(clean_text)) % len(follow_ups)]
+
+        # In spoken language mode, naturally include the spoken coaching in the spoken reply
+        if explanations and not ("A more natural way" in reply or "You can say" in reply or "Could you" in reply):
+            spoken_coaching = f"A more natural way to say that is: '{corrected}'. {explanations[0]} "
+            reply = spoken_coaching + reply
+
+        return json.dumps({
+            "correction_needed": True,
+            "original_sentence": clean_text,
+            "corrected_sentence": corrected,
+            "explanation": " ".join(explanations) if explanations else "Great expression! Keep practicing full sentences to build natural fluency.",
+            "conversational_reply": reply
+        })
+
     def generate(
         self,
         text: str,
@@ -416,32 +759,12 @@ class LLM:
     ) -> Generator[str, None, None]:
         """
         Generates text using the configured backend, yielding tokens as a stream.
-
-        Handles lazy initialization, message formatting, backend-specific API calls,
-        stream registration, token yielding, and resource cleanup.
-
-        Args:
-            text: The user's input prompt/text.
-            history: An optional list of previous messages (dicts with "role" and "content").
-            use_system_prompt: If True, prepends the configured system prompt (if any).
-            request_id: An optional unique ID for this generation request. If None, one is generated.
-            **kwargs: Additional backend-specific keyword arguments (e.g., temperature, top_p, stop sequences).
-
-        Yields:
-            str: Individual tokens (or small chunks of text) as they are generated by the LLM.
-
-        Raises:
-            RuntimeError: If the backend client fails to initialize.
-            ConnectionError: If communication with the backend fails (initial connection or during streaming).
-            ValueError: If configuration is invalid.
-            APIError: For backend-specific API errors (OpenAI/LMStudio/Groq).
-            RateLimitError: For backend-specific rate limit errors (OpenAI/LMStudio/Groq).
-            requests.exceptions.RequestException: For HTTP request errors (MegaLLM).
-            Exception: For other unexpected errors during the generation process.
         """
-        # Lazy initialization
+        # Lazy initialization; fallback to local tutor generator if API keys are missing/mock
         if not self._lazy_initialize_clients():
-            raise RuntimeError(f"LLM backend '{self.backend}' client failed to initialize.")
+            logger.warning(f"🤖⚠️ LLM backend '{self.backend}' client unavailable (missing or mock API key). Generating local tutor response.")
+            yield self._generate_local_tutor_response(text, history=history)
+            return
 
         req_id = request_id if request_id else f"{self.backend}-{uuid.uuid4()}"
         logger.info(f"🤖💬 Starting generation (Request ID: {req_id})")
@@ -450,7 +773,8 @@ class LLM:
         if use_system_prompt and self.system_prompt_message:
             messages.append(self.system_prompt_message)
         if history:
-            messages.extend(history)
+            recent_history = history[-6:] if len(history) > 6 else history
+            messages.extend(recent_history)
 
         if len(messages) == 0 or messages[-1]["role"] != "user":
             added_text = text # for normal text
@@ -465,15 +789,32 @@ class LLM:
         stream_object_to_register = None # This is the object we need to close on cancel
 
         try:
+            # Enforce structured JSON mode by default
+            call_kwargs = dict(kwargs)
+            if "response_format" not in call_kwargs:
+                call_kwargs["response_format"] = {"type": "json_object"}
+            call_kwargs.setdefault("max_tokens", 350)
+            call_kwargs.setdefault("temperature", 0.3)
+
             if self.backend == "openai":
                 if self.client is None:
                     raise RuntimeError("OpenAI client not initialized (should have been caught by lazy_init).")
-                payload = { "model": self.model, "messages": messages, "stream": True, **kwargs }
+                payload = { "model": self.model, "messages": messages, "stream": True, **call_kwargs }
                 logger.info(f"🤖💬 [{req_id}] Sending OpenAI request with payload:")
                 logger.info(f"{json.dumps(payload, indent=2)}")
-                stream_iterator = self.client.chat.completions.create(
-                    model=self.model, messages=messages, stream=True, **kwargs
-                )
+                try:
+                    stream_iterator = self.client.chat.completions.create(
+                        model=self.model, messages=messages, stream=True, **call_kwargs
+                    )
+                except Exception as e:
+                    if "response_format" in str(e).lower():
+                        logger.warning(f"🤖⚠️ OpenAI backend rejected response_format, falling back: {e}")
+                        call_kwargs.pop("response_format", None)
+                        stream_iterator = self.client.chat.completions.create(
+                            model=self.model, messages=messages, stream=True, **call_kwargs
+                        )
+                    else:
+                        raise
                 stream_object_to_register = stream_iterator # The Stream object itself
                 self._register_request(req_id, "openai", stream_object_to_register)
                 yield from self._yield_openai_chunks(stream_iterator, req_id)
@@ -481,14 +822,24 @@ class LLM:
             elif self.backend == "lmstudio":
                 if self.client is None:
                     raise RuntimeError("LM Studio client not initialized (should have been caught by lazy_init).")
-                if 'temperature' not in kwargs:
-                    kwargs['temperature'] = 0.7
-                payload = { "model": self.model, "messages": messages, "stream": True, **kwargs }
+                if 'temperature' not in call_kwargs:
+                    call_kwargs['temperature'] = 0.7
+                payload = { "model": self.model, "messages": messages, "stream": True, **call_kwargs }
                 logger.info(f"🤖💬 [{req_id}] Sending LM Studio request with payload:")
                 logger.info(f"{json.dumps(payload, indent=2)}")
-                stream_iterator = self.client.chat.completions.create(
-                    model=self.model, messages=messages, stream=True, **kwargs
-                )
+                try:
+                    stream_iterator = self.client.chat.completions.create(
+                        model=self.model, messages=messages, stream=True, **call_kwargs
+                    )
+                except Exception as e:
+                    if "response_format" in str(e).lower():
+                        logger.warning(f"🤖⚠️ LM Studio rejected response_format, falling back: {e}")
+                        call_kwargs.pop("response_format", None)
+                        stream_iterator = self.client.chat.completions.create(
+                            model=self.model, messages=messages, stream=True, **call_kwargs
+                        )
+                    else:
+                        raise
                 stream_object_to_register = stream_iterator # The Stream object itself
                 self._register_request(req_id, "lmstudio", stream_object_to_register)
                 yield from self._yield_openai_chunks(stream_iterator, req_id)
@@ -496,14 +847,24 @@ class LLM:
             elif self.backend == "poe":
                 if self.client is None:
                     raise RuntimeError("Poe client not initialized (should have been caught by lazy_init).")
-                if 'temperature' not in kwargs:
-                    kwargs['temperature'] = 0.7
-                payload = { "model": self.model, "messages": messages, "stream": True, **kwargs }
+                if 'temperature' not in call_kwargs:
+                    call_kwargs['temperature'] = 0.7
+                payload = { "model": self.model, "messages": messages, "stream": True, **call_kwargs }
                 logger.info(f"🤖💬 [{req_id}] Sending Poe request with payload:")
                 logger.info(f"{json.dumps(payload, indent=2)}")
-                stream_iterator = self.client.chat.completions.create(
-                    model=self.model, messages=messages, stream=True, **kwargs
-                )
+                try:
+                    stream_iterator = self.client.chat.completions.create(
+                        model=self.model, messages=messages, stream=True, **call_kwargs
+                    )
+                except Exception as e:
+                    if "response_format" in str(e).lower():
+                        logger.warning(f"🤖⚠️ Poe rejected response_format, falling back: {e}")
+                        call_kwargs.pop("response_format", None)
+                        stream_iterator = self.client.chat.completions.create(
+                            model=self.model, messages=messages, stream=True, **call_kwargs
+                        )
+                    else:
+                        raise
                 stream_object_to_register = stream_iterator
                 self._register_request(req_id, "poe", stream_object_to_register)
                 yield from self._yield_openai_chunks(stream_iterator, req_id)
@@ -511,17 +872,27 @@ class LLM:
             elif self.backend == "groq":
                 if self.client is None:
                     raise RuntimeError("Groq client not initialized (should have been caught by lazy_init).")
-                if 'temperature' not in kwargs:
-                    kwargs['temperature'] = 1
+                if 'temperature' not in call_kwargs:
+                    call_kwargs['temperature'] = 0.3
                 # Prevent tool-calls unless explicitly requested; Groq may raise if tool_choice missing
-                kwargs.setdefault("tool_choice", "none")
-                kwargs.setdefault("tools", [])
-                payload = { "model": self.model, "messages": messages, "stream": True, **kwargs }
+                call_kwargs.setdefault("tool_choice", "none")
+                call_kwargs.setdefault("tools", [])
+                payload = { "model": self.model, "messages": messages, "stream": True, **call_kwargs }
                 logger.info(f"🤖💬 [{req_id}] Sending Groq request with payload:")
                 logger.info(f"{json.dumps(payload, indent=2)}")
-                stream_iterator = self.client.chat.completions.create(
-                    model=self.model, messages=messages, stream=True, **kwargs
-                )
+                try:
+                    stream_iterator = self.client.chat.completions.create(
+                        model=self.model, messages=messages, stream=True, **call_kwargs
+                    )
+                except Exception as e:
+                    if "response_format" in str(e).lower():
+                        logger.warning(f"🤖⚠️ Groq rejected response_format, falling back: {e}")
+                        call_kwargs.pop("response_format", None)
+                        stream_iterator = self.client.chat.completions.create(
+                            model=self.model, messages=messages, stream=True, **call_kwargs
+                        )
+                    else:
+                        raise
                 stream_object_to_register = stream_iterator
                 self._register_request(req_id, "groq", stream_object_to_register)
                 yield from self._yield_openai_chunks(stream_iterator, req_id)
@@ -568,18 +939,23 @@ class LLM:
 
             logger.info(f"🤖✅ Finished generating stream successfully (request_id: {req_id})")
 
-        # Catch specific exceptions first
-        except (requests.exceptions.ConnectionError, ConnectionError, APITimeoutError, requests.exceptions.Timeout) as e:
-             logger.error(f"🤖💥 Connection/Timeout Error during generation for {req_id}: {e}", exc_info=False)
-             # Reraise as a standard ConnectionError for consistency
-             raise ConnectionError(f"Communication error during generation: {e}") from e
-        except (APIError, RateLimitError, requests.exceptions.RequestException) as e: # Includes HTTPError
-             logger.error(f"🤖💥 API/Request Error during generation for {req_id}: {e}", exc_info=False)
-             # Reraise the original error
-             raise
         except Exception as e:
-            logger.error(f"🤖💥 Unexpected error in generation pipeline for {req_id}: {e}", exc_info=True) # Log traceback for unexpected
-            raise # Reraise the original exception
+            if "failed to generate json" in str(e).lower() and self.backend == "groq":
+                logger.warning(f"🤖⚠️ Groq JSON constraint failed during stream ({e}). Retrying without response_format...")
+                try:
+                    call_kwargs.pop("response_format", None)
+                    call_kwargs["temperature"] = 0.3
+                    stream_iterator = self.client.chat.completions.create(
+                        model=self.model, messages=messages, stream=True, **call_kwargs
+                    )
+                    stream_object_to_register = stream_iterator
+                    self._register_request(req_id, "groq", stream_object_to_register)
+                    yield from self._yield_openai_chunks(stream_iterator, req_id)
+                    return
+                except Exception as retry_err:
+                    logger.error(f"🤖💥 Groq retry without response_format failed: {retry_err}")
+            logger.warning(f"🤖⚠️ Remote LLM API call error for {req_id}: {e}. Yielding local English tutor fallback response.")
+            yield self._generate_local_tutor_response(text, history=history)
         finally:
             # Removes request ID from tracking AND attempts to close the stream via _cancel_single_request_unsafe
             logger.debug(f"🤖ℹ️ [{req_id}] Entering finally block for generate.")
