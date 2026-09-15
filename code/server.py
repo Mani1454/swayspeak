@@ -45,7 +45,7 @@ TTS_START_ENGINE = os.getenv("TTS_ENGINE", "deepgram").lower()
 STT_BACKEND = os.getenv("STT_BACKEND", "deepgram").lower()
 
 LLM_START_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
-LLM_START_MODEL = os.getenv("LLM_MODEL", "groq/compound-mini")
+LLM_START_MODEL = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")
 
 if __name__ == "__main__":
     logger.info(f"🖥️⚙️ {Colors.apply('[PARAM]').blue} Starting engine: {Colors.apply(TTS_START_ENGINE).blue}")

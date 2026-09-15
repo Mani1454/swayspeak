@@ -163,8 +163,8 @@ class LLM:
              raise ImportError("openai library is required for the 'openai'/'lmstudio' backends but not installed.")
 
         self.model = model
-        if self.backend == "groq" and (not self.model or self.model in ("openai/gpt-oss-20b", "llama-3.3-70b-versatile")):
-            self.model = os.getenv("GROQ_MODEL", "groq/compound-mini")
+        if self.backend == "groq" and (not self.model or self.model in ("openai/gpt-oss-20b", "llama-3.3-70b-versatile", "groq/compound-mini")):
+            self.model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
         self.system_prompt = system_prompt
         self._api_key = api_key
         self._base_url = base_url
@@ -547,6 +547,11 @@ class LLM:
             (r"\bdid went\b", "went", "Avoid double past tense; say 'went' or 'did go'."),
             (r"\bdid saw\b", "saw", "Avoid double past tense; say 'saw' or 'did see'."),
             (r"\bdid bought\b", "bought", "Avoid double past tense; say 'bought' or 'did buy'."),
+            (r"\bdidn't got\b", "didn't get", "After 'didn't', always use the base form of the verb: say 'didn't get' instead of 'didn't got'."),
+            (r"\bdid not got\b", "did not get", "After 'did not', always use the base form of the verb: say 'did not get'."),
+            (r"\bplaces? for visit\b", "places to visit", "Use the infinitive 'places to visit' rather than 'places for visit'."),
+            (r"\bhave a confusion\b", "have a question", "Say 'I have a question' or 'I am confused about' rather than 'I have a confusion'."),
+            (r"\bwhat should be\b", "which is correct", "Say 'which is correct' or 'what should it be'."),
             # Subject-verb agreement
             (r"\byesterday i goes\b", "yesterday I went", "Use 'went' instead of 'goes' for past actions."),
             (r"\bi goes\b", "I go", "Use 'go' with 'I' in the present tense."),
@@ -628,15 +633,22 @@ class LLM:
             else:
                 words = clean_text.split()
                 if words:
-                    words = ["I" if w == "i" else ("I'm" if w == "i'm" else w) for w in words]
+                    # Deduplicate repeated adjacent words from stuttering or transcription artifacts
+                    deduped_words = []
+                    for w in words:
+                        if not deduped_words or deduped_words[-1].lower() != w.lower():
+                            deduped_words.append(w)
+                    words = ["I" if w == "i" else ("I'm" if w == "i'm" else w) for w in deduped_words]
                     polished = " ".join(words)
-                    is_question = bool(re.match(r"^(who|what|where|when|why|how|can|could|would|should|do|does|did|is|are|was|were|may)\b", lower))
+                    # Clean repeated phrase chunks like "what are the places what are the places"
+                    polished = re.sub(r'\b(.+?)\s+\1\b', r'\1', polished, flags=re.IGNORECASE)
+                    is_question = bool(re.match(r"^(who|what|where|when|why|how|can|could|would|should|do|does|did|is|are|was|were|may|which)\b", lower))
                     punct = "?" if is_question else "."
                     polished = polished[0].upper() + polished[1:] if len(polished) > 1 else polished.upper()
                     if not polished.endswith((".", "?", "!")):
                         polished += punct
                     corrected = polished
-                    explanations.append("Your sentence is clear! To sound even more natural, focus on speaking smoothly and with confidence.")
+                    explanations.append("Your sentence is clear! Focus on speaking smoothly and with confidence.")
 
         # Always capitalize the corrected sentence and ensure ending punctuation
         if corrected:
@@ -693,6 +705,15 @@ class LLM:
 
         elif any(f in lower for f in ["pizza", "burger", "coffee", "tea", "cook", "restaurant", "food", "lunch", "dinner", "breakfast", "curry", "rice", "snack"]):
             reply = "That sounds delicious! Do you usually enjoy cooking your meals at home, or do you prefer eating out at restaurants?"
+
+        elif "didn't got" in lower or ("didn't get" in lower and any(w in lower for w in ["correct", "what", "which", "right", "confusion"])):
+            reply = "The correct phrase is 'I didn't get it.' In English, whenever you use 'didn't' or 'did not', the main verb must always stay in its base form, so you say 'didn't get' instead of 'didn't got'. Would you like to try practicing that in a sentence?"
+
+        elif "pune" in lower:
+            reply = "Pune has some wonderful places to explore! You should definitely check out the historic Shaniwar Wada fort, the beautiful Aga Khan Palace, and if you enjoy nature and hiking, Sinhagad Fort offers amazing scenic views. Do you prefer historical landmarks, or are you looking for outdoor scenic spots?"
+
+        elif "scenery" in lower or "scenic" in lower:
+            reply = "If you love scenery, visiting hill stations, historic forts, and lush nature walks is definitely the best choice! Do you prefer mountain views, or relaxing near lakes and open greenery?"
 
         elif any(pl in lower for pl in ["travel", "visit", "trip", "vacation", "flight", "beach", "mountain", "country", "city", "japan", "paris", "london", "india", "america", "italy"]):
             reply = "That sounds like an amazing place! What attracts you most to that destination--the culture, the food, or the scenery?"
@@ -792,7 +813,9 @@ class LLM:
             # Enforce structured JSON mode by default
             call_kwargs = dict(kwargs)
             if "response_format" not in call_kwargs:
-                call_kwargs["response_format"] = {"type": "json_object"}
+                has_json_mention = any("json" in (m.get("content") or "").lower() for m in messages)
+                if has_json_mention:
+                    call_kwargs["response_format"] = {"type": "json_object"}
             call_kwargs.setdefault("max_tokens", 350)
             call_kwargs.setdefault("temperature", 0.3)
 
