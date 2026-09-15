@@ -19,13 +19,13 @@ if ! command -v conda >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[INFO] Creating/updating conda environment auraspeak..."
-conda env create --file environment.yml --name auraspeak --force
+echo "[INFO] Creating/updating conda environment swayspeak..."
+conda env create --file environment.yml --name swayspeak --force
 
 # Activate conda in a POSIX shell
 CONDA_BASE="$(conda info --base)"
 source "$CONDA_BASE/etc/profile.d/conda.sh"
-conda activate auraspeak
+conda activate swayspeak
 
 echo "[INFO] Installing/updating Python dependencies..."
 pip install -r requirements.txt

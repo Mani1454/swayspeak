@@ -31,18 +31,18 @@ if errorlevel 1 (
   goto :error
 )
 
-echo [INFO] Creating/updating conda environment "auraspeak"...
-call conda env update --file environment.yml --name auraspeak --prune
+echo [INFO] Creating/updating conda environment "swayspeak"...
+call conda env update --file environment.yml --name swayspeak --prune
 if errorlevel 1 (
   echo [INFO] Environment may not exist, creating new one...
-  call conda env create --file environment.yml --name auraspeak
+  call conda env create --file environment.yml --name swayspeak
   if errorlevel 1 (
     echo [ERROR] Failed to create/update conda environment.
     goto :error
   )
 )
 
-call conda activate auraspeak
+call conda activate swayspeak
 if errorlevel 1 (
   echo [ERROR] Failed to activate conda environment.
   goto :error

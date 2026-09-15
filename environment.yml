@@ -1,4 +1,4 @@
-name: auraspeak
+name: swayspeak
 channels:
   - defaults
   - conda-forge
