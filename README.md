@@ -7,6 +7,10 @@
 [![Deepgram](https://img.shields.io/badge/Voice%20AI-Deepgram%20Nova--3%20%26%20Aura-13EF93?style=for-the-badge)](https://deepgram.com)
 [![Groq](https://img.shields.io/badge/LLM-Qwen%203.8%2027B%20%28Groq%29-F55036?style=for-the-badge)](https://groq.com)
 
+<p align="center">
+  <img src="code/static/swayspeak_thumbnail.png" alt="SwaySpeak Hero Banner" width="100%" />
+</p>
+
 A high-performance, ultra-low latency **interactive English conversation coach** designed for real-time spoken practice.  
 Built for **natural conversation, real-time grammar coaching, and confidence building**.
 
