@@ -35,7 +35,99 @@ Runs smoothly on standard consumer laptops or cloud CPU containers using the wor
 
 ---
 
-## 🏗️ Architecture & Technologies
+## 🏗️ System Architecture & Communication Flow
+
+![SwaySpeak System Architecture](code/static/swayspeak_architecture.png)
+
+### 🔄 End-to-End Component Flowchart
+
+```mermaid
+flowchart LR
+    subgraph Client["🖥️ Client (Web Browser)"]
+        direction TB
+        Mic["🎙️ User Microphone"]
+        CapWorklet["AudioWorklet (16kHz PCM Capture)"]
+        WSClient["WebSocket Client (/ws)"]
+        PlayWorklet["AudioWorklet (24kHz Linear Playback)"]
+        UI["Glowing Reactive Core & Coach Cards"]
+        
+        Mic --> CapWorklet --> WSClient
+        WSClient --> PlayWorklet
+        WSClient --> UI
+    end
+
+    subgraph Backend["⚡ FastAPI Backend Server"]
+        direction TB
+        WSServer["FastAPI WebSocket Server"]
+        Resampler["Rational Polyphase Resampler (160/441)"]
+        SPM["SpeechPipelineManager (Thread Coordinator)"]
+        VAD["Utterance Accumulator & 1.2s Endpointing"]
+        Parser["Pydantic Tutor Schema Validator"]
+        
+        WSServer --> Resampler --> SPM
+        SPM --> VAD
+        SPM --> Parser
+    end
+
+    subgraph DeepgramCloud["🎙️ Deepgram Voice Cloud"]
+        direction TB
+        STT["Nova-3 STT (WebSocket Stream)"]
+        TTS["Aura-Asteria TTS (Streaming HTTP/2)"]
+    end
+
+    subgraph GroqCloud["🧠 Groq LPU Cloud"]
+        direction TB
+        LLM["Qwen 3.8 27B (~20ms TTFT)"]
+    end
+
+    %% Communication channels
+    WSClient -- "Raw PCM Audio (16kHz WSS)" --> WSServer
+    Resampler -- "16kHz Linear PCM Stream" --> STT
+    STT -- "Live Interim & Final Transcripts" --> SPM
+    SPM -- "User Prompt + Conversation Context" --> LLM
+    LLM -- "Structured JSON Tokens (Stream)" --> Parser
+    Parser -- "Spoken Conversational Reply" --> TTS
+    TTS -- "Linear 24kHz PCM Chunks" --> SPM
+    SPM -- "24kHz Audio Stream + Coach Cards JSON" --> WSServer
+    WSServer -- "TTS Audio Chunks & Visual Feedback (WSS)" --> WSClient
+```
+
+### ⏱️ Turn Lifecycle Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 👤 Learner
+    participant Browser as 🖥️ Browser (AudioWorklet)
+    participant FastAPI as ⚡ FastAPI Backend
+    participant Deepgram as 🎙️ Deepgram Cloud (Nova-3 & Aura)
+    participant Groq as 🧠 Groq Cloud (Qwen 3.8 27B)
+
+    User->>Browser: Speaks question or thought
+    Browser->>FastAPI: Streams 16kHz PCM chunks via WebSocket (/ws)
+    FastAPI->>Deepgram: Forwards raw PCM to Nova-3 STT WebSocket
+    Deepgram-->>FastAPI: Interim transcripts (Hot words)
+    FastAPI-->>Browser: partial_user_request (Live transcript in UI)
+    
+    Note over Deepgram,FastAPI: User pauses for >1.2s (VAD Turn Endpointing)
+    Deepgram-->>FastAPI: speech_final=True (Utterance Finalized)
+    FastAPI-->>Browser: final_user_request
+    
+    FastAPI->>Groq: Stream prompt (System persona + Conversation context)
+    Groq-->>FastAPI: Streams structured JSON tokens (~20ms TTFT)
+    
+    FastAPI->>FastAPI: Validates & extracts 'conversational_reply' + coaching tip
+    FastAPI->>Deepgram: Request Aura-Asteria TTS synthesis
+    Deepgram-->>FastAPI: Linear 24kHz PCM audio chunks
+    
+    par Stream Audio & UI Feedback
+        FastAPI->>Browser: Stream 24kHz audio chunks for playback
+        FastAPI->>Browser: Send Visual Coach Card (Corrected sentence + Tip)
+    end
+    Browser->>User: Speaks answer aloud + Displays visual coaching card
+```
+
+### 🛠️ Technology Stack Breakdown
 
 | Layer | Technology | Details |
 | :--- | :--- | :--- |
