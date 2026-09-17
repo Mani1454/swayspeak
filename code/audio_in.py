@@ -62,6 +62,8 @@ class AudioInputProcessor:
         self.input_sample_rate = 16000
         self._resample_up = 1
         self._resample_down = 1
+        self._resample_phase = 0.0
+        self._resample_last_sample = 0.0
         self.set_input_sample_rate(16000)
 
         self._setup_callbacks()
@@ -70,11 +72,13 @@ class AudioInputProcessor:
     def set_input_sample_rate(self, sr: int) -> None:
         """
         Dynamically updates the input sample rate from the client and recalculates
-        exact rational polyphase resampling factors to target 16kHz with zero pitch or speed distortion.
+        exact rational factors to target 16kHz with zero pitch or speed distortion.
         """
         if not sr or sr <= 0:
             return
         self.input_sample_rate = int(sr)
+        self._resample_phase = 0.0
+        self._resample_last_sample = 0.0
         divisor = math.gcd(self.target_sample_rate, self.input_sample_rate)
         self._resample_up = self.target_sample_rate // divisor
         self._resample_down = self.input_sample_rate // divisor
@@ -148,15 +152,14 @@ class AudioInputProcessor:
     def process_audio_chunk(self, raw_bytes: bytes) -> np.ndarray:
         """
         Converts raw audio bytes (int16) to a 16kHz 16-bit PCM numpy array.
-        Uses exact rational polyphase resampling matching the client hardware sample rate.
         If client audio is already 16kHz, audio passes through with zero processing.
+        Otherwise, uses continuous phase carry-over across streaming chunks with zero boundary distortion.
 
         Args:
             raw_bytes: Raw audio data assumed to be in int16 format.
 
         Returns:
-            A numpy array containing the resampled audio in int16 format at 16kHz.
-            Returns an array of zeros if the input is silent.
+            A numpy array containing the audio in int16 format at 16kHz.
         """
         raw_audio = np.frombuffer(raw_bytes, dtype=np.int16)
         if len(raw_audio) == 0:
@@ -166,21 +169,27 @@ class AudioInputProcessor:
         if self._resample_up == 1 and self._resample_down == 1:
             return raw_audio
 
-        if np.max(np.abs(raw_audio)) == 0:
-            # Calculate expected length after resampling for silence
-            expected_len = int(np.ceil(len(raw_audio) * self._resample_up / self._resample_down))
-            return np.zeros(expected_len, dtype=np.int16)
+        # High-fidelity continuous phase carry-over across streaming chunks
+        ratio = self.input_sample_rate / self.target_sample_rate
+        in32 = raw_audio.astype(np.float32)
+        out_samples = []
 
-        # Convert to float32 for resampling precision
-        audio_float32 = raw_audio.astype(np.float32)
+        while self._resample_phase < len(in32):
+            idx = int(math.floor(self._resample_phase))
+            frac = self._resample_phase - idx
+            s0 = in32[idx]
+            s1 = in32[idx + 1] if (idx + 1 < len(in32)) else self._resample_last_sample
+            s = (1.0 - frac) * s0 + frac * s1
+            out_samples.append(s)
+            self._resample_phase += ratio
 
-        # Resample using float32 data with exact rational factors
-        resampled_float = resample_poly(audio_float32, self._resample_up, self._resample_down)
+        self._resample_phase -= len(in32)
+        self._resample_last_sample = in32[-1]
 
-        # Convert back to int16, clipping to ensure validity
-        resampled_int16 = np.clip(resampled_float, -32768, 32767).astype(np.int16)
+        if not out_samples:
+            return np.array([], dtype=np.int16)
 
-        return resampled_int16
+        return np.clip(np.array(out_samples, dtype=np.float32), -32768, 32767).astype(np.int16)
 
 
     async def process_chunk_queue(self, audio_queue: asyncio.Queue) -> None:

@@ -62,7 +62,7 @@ let dataArray = null;
 let animationId = null;
 
 // --- BATCHING ---
-const BATCH_SAMPLES = 2048;
+const BATCH_SAMPLES = 1024;
 const HEADER_BYTES  = 8;
 const MESSAGE_BYTES = HEADER_BYTES + (BATCH_SAMPLES * 2);
 const bufferPool = [];
@@ -180,12 +180,11 @@ function ensureSocket() {
       setStatus("ONLINE", "#00f0ff");
       // Tell backend to clear history so opening another chat starts fresh with zero previous memory
       socket.send(JSON.stringify({ type: 'clear_history' }));
-      if (audioContext && audioContext.sampleRate) {
-        socket.send(JSON.stringify({
-          type: 'client_audio_config',
-          sample_rate: audioContext.sampleRate
-        }));
-      }
+      // Worklet delivers exact 16kHz PCM for Deepgram STT
+      socket.send(JSON.stringify({
+        type: 'client_audio_config',
+        sample_rate: 16000
+      }));
       tutorHistory = [];
       lastUserText = "";
       lastSentSpeech = "";
@@ -482,11 +481,11 @@ async function ensurePlaybackSystem() {
     }
   }
 
-  // Sync client sample rate with server so rational resampling perfectly preserves pitch & speed
-  if (socket && socket.readyState === WebSocket.OPEN && audioContext.sampleRate) {
+  // Sync client microphone sample rate (16kHz from pcmWorkletProcessor) with server
+  if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({
       type: 'client_audio_config',
-      sample_rate: audioContext.sampleRate
+      sample_rate: 16000
     }));
   }
 
