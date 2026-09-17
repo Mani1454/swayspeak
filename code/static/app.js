@@ -39,7 +39,9 @@ let socket = null;
 let audioContext = null;
 let mediaStream = null;
 let micWorkletNode = null;
-let ttsWorkletNode = null;
+let scheduledPlaybackSources = [];
+let nextScheduledPlaybackTime = 0;
+let ttsPlaybackEndTimer = null;
 let isTTSPlaying = false;
 let isRecording = false;
 let ignoreIncomingTTS = false;
@@ -141,6 +143,7 @@ resetBtn.onclick = () => {
     clearTimeout(echoCooldownTimer);
     echoCooldownTimer = null;
   }
+  stopAllTTSPlayback();
   if (window.speechSynthesis) {
     try { window.speechSynthesis.cancel(); } catch (e) {}
   }
@@ -419,6 +422,7 @@ function stopConnection() {
   if (speechRec) {
     try { speechRec.abort(); } catch (e) {}
   }
+  stopAllTTSPlayback();
   if (window.speechSynthesis) {
     try { window.speechSynthesis.cancel(); } catch (e) {}
   }
@@ -488,49 +492,123 @@ async function ensurePlaybackSystem() {
       sample_rate: 16000
     }));
   }
+  return audioContext;
+}
 
-  if (!ttsWorkletNode) {
-    await audioContext.audioWorklet.addModule('/static/ttsPlaybackProcessor.js');
-    ttsWorkletNode = new AudioWorkletNode(audioContext, 'tts-playback-processor');
-    ttsWorkletNode.port.postMessage({ type: 'setSourceSampleRate', sampleRate: 24000 });
-    ttsWorkletNode.port.onmessage = (event) => {
-      const { type } = event.data;
-      if (type === 'ttsPlaybackStarted') {
-        isAssistantSpeaking = true;
-        isTutorProcessing = true;
-        if (speechRec) {
-          try { speechRec.abort(); } catch (e) {}
-        }
-        if (!isTTSPlaying && socket) {
-          isTTSPlaying = true;
-          orbContainer.classList.add("speaking");
-          socket.send(JSON.stringify({ type: 'tts_start' }));
-        }
-      } else if (type === 'ttsPlaybackStopped') {
-        if (isTTSPlaying) {
-          isTTSPlaying = false;
-          ignoreIncomingTTS = false;
-          orbContainer.classList.remove("speaking");
-          if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'tts_stop' }));
-          }
-        }
-        // Room echo cooldown: Wait 600ms after speaker audio finishes before re-enabling mic
-        if (echoCooldownTimer) clearTimeout(echoCooldownTimer);
-        echoCooldownTimer = setTimeout(() => {
-          isAssistantSpeaking = false;
-          isTutorProcessing = false;
-          currentSpeechText = "";
-          if (isRecording && speechRec) {
-            try { speechRec.start(); } catch (e) {}
-          }
-          updateLiveText("SwaySpeak Tutor Listening...", "SWAY TUTOR");
-        }, 600);
-      }
-    };
-    ttsWorkletNode.connect(audioContext.destination);
+function stopAllTTSPlayback() {
+  if (ttsPlaybackEndTimer) {
+    clearTimeout(ttsPlaybackEndTimer);
+    ttsPlaybackEndTimer = null;
   }
-  return ttsWorkletNode;
+  for (let i = 0; i < scheduledPlaybackSources.length; i++) {
+    try {
+      scheduledPlaybackSources[i].stop();
+      scheduledPlaybackSources[i].disconnect();
+    } catch (e) {}
+  }
+  scheduledPlaybackSources = [];
+  nextScheduledPlaybackTime = 0;
+
+  if (window.speechSynthesis) {
+    try { window.speechSynthesis.cancel(); } catch (e) {}
+  }
+
+  if (isTTSPlaying) {
+    isTTSPlaying = false;
+    orbContainer.classList.remove("speaking");
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'tts_stop' }));
+    }
+  }
+}
+
+function playTTSChunk(int16Array, sourceRate = 24000) {
+  if (!int16Array || int16Array.length === 0) return;
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioContext.state === "suspended") {
+    audioContext.resume().catch(() => {});
+  }
+
+  // Cancel any browser speech synthesis utterance immediately
+  if (window.speechSynthesis) {
+    try { window.speechSynthesis.cancel(); } catch (e) {}
+  }
+
+  // Convert Int16 PCM to Float32 [-1.0, 1.0]
+  const float32 = new Float32Array(int16Array.length);
+  for (let i = 0; i < int16Array.length; i++) {
+    float32[i] = int16Array[i] / 32768.0;
+  }
+
+  // Native Web Audio buffer resampled accurately to hardware rate by browser engine
+  const buffer = audioContext.createBuffer(1, float32.length, sourceRate);
+  buffer.copyToChannel(float32, 0);
+
+  const source = audioContext.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioContext.destination);
+
+  const now = audioContext.currentTime;
+  // If nextScheduledPlaybackTime is behind current time (initial start or queue underrun),
+  // add a 120ms initial buffer so audio playback starts smoothly without clipping
+  if (nextScheduledPlaybackTime < now) {
+    nextScheduledPlaybackTime = now + 0.120;
+  }
+
+  const startTime = nextScheduledPlaybackTime;
+  source.start(startTime);
+  nextScheduledPlaybackTime += buffer.duration;
+
+  scheduledPlaybackSources.push(source);
+  source.onended = () => {
+    const idx = scheduledPlaybackSources.indexOf(source);
+    if (idx !== -1) scheduledPlaybackSources.splice(idx, 1);
+  };
+
+  // Signal assistant speaking state
+  if (!isTTSPlaying) {
+    isTTSPlaying = true;
+    isAssistantSpeaking = true;
+    isTutorProcessing = true;
+    orbContainer.classList.add("speaking");
+    if (speechRec) {
+      try { speechRec.abort(); } catch (e) {}
+    }
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'tts_start' }));
+    }
+  }
+
+  // Schedule playback finished callback when all queued audio ends
+  if (ttsPlaybackEndTimer) clearTimeout(ttsPlaybackEndTimer);
+  const remainingMs = Math.max(50, Math.ceil((nextScheduledPlaybackTime - audioContext.currentTime) * 1000));
+  ttsPlaybackEndTimer = setTimeout(() => {
+    onTTSPlaybackEnded();
+  }, remainingMs + 350);
+}
+
+function onTTSPlaybackEnded() {
+  if (!isTTSPlaying) return;
+  isTTSPlaying = false;
+  ignoreIncomingTTS = false;
+  orbContainer.classList.remove("speaking");
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: 'tts_stop' }));
+  }
+
+  // Room echo cooldown: Wait 600ms after speaker audio finishes before re-enabling mic
+  if (echoCooldownTimer) clearTimeout(echoCooldownTimer);
+  echoCooldownTimer = setTimeout(() => {
+    isAssistantSpeaking = false;
+    isTutorProcessing = false;
+    currentSpeechText = "";
+    if (isRecording && speechRec) {
+      try { speechRec.start(); } catch (e) {}
+    }
+    updateLiveText("SwaySpeak Tutor Listening...", "SWAY TUTOR");
+  }, 600);
 }
 
 async function startAudioSystem() {
@@ -576,8 +654,8 @@ async function startAudioSystem() {
 }
 
 function cleanupAudio() {
+  stopAllTTSPlayback();
   if (micWorkletNode) { micWorkletNode.disconnect(); micWorkletNode = null; }
-  if (ttsWorkletNode) { ttsWorkletNode.disconnect(); ttsWorkletNode = null; }
   if (audioContext) { audioContext.close(); audioContext = null; }
   if (mediaStream) { mediaStream.getAudioTracks().forEach(t => t.stop()); mediaStream = null; }
 }
@@ -677,49 +755,45 @@ function handleJSONMessage({ type, content }) {
       addLogEntry("assistant", replyText);
       updateLiveText(replyText, "SWAY TUTOR");
 
-      // Spoken voice playback: If server-side TTS didn't produce chunks (e.g. mock key), speak using browser Web Speech API
-      if (!serverPlayedAudio && window.speechSynthesis) {
-        try {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(replyText);
-          utterance.lang = 'en-US';
-          utterance.rate = 1.0;
-          utterance.onstart = () => {
-            isAssistantSpeaking = true;
-            isTutorProcessing = true;
-            orbContainer.classList.add("speaking");
-            if (speechRec) {
-              try { speechRec.abort(); } catch (e) {}
+      // Spoken voice playback: Deepgram server TTS streams audio chunks directly to playTTSChunk.
+      // We only fallback to window.speechSynthesis if server audio chunks never arrive after a safety grace period.
+      if (!serverPlayedAudio && !isTTSPlaying) {
+        setTimeout(() => {
+          if (!serverPlayedAudio && !isTTSPlaying && window.speechSynthesis) {
+            try {
+              window.speechSynthesis.cancel();
+              const utterance = new SpeechSynthesisUtterance(replyText);
+              utterance.lang = 'en-US';
+              utterance.rate = 0.82; // Calm, steady tutor pace
+              utterance.onstart = () => {
+                isAssistantSpeaking = true;
+                isTutorProcessing = true;
+                orbContainer.classList.add("speaking");
+                if (speechRec) {
+                  try { speechRec.abort(); } catch (e) {}
+                }
+              };
+              const handleSpeechEnd = () => {
+                orbContainer.classList.remove("speaking");
+                if (echoCooldownTimer) clearTimeout(echoCooldownTimer);
+                echoCooldownTimer = setTimeout(() => {
+                  isAssistantSpeaking = false;
+                  isTutorProcessing = false;
+                  currentSpeechText = "";
+                  if (isRecording && speechRec) {
+                    try { speechRec.start(); } catch (e) {}
+                  }
+                  updateLiveText("SwaySpeak Tutor Listening...", "SWAY TUTOR");
+                }, 600);
+              };
+              utterance.onend = handleSpeechEnd;
+              utterance.onerror = handleSpeechEnd;
+              window.speechSynthesis.speak(utterance);
+            } catch (synthErr) {
+              console.warn("SpeechSynthesis error:", synthErr);
             }
-          };
-          const handleSpeechEnd = () => {
-            orbContainer.classList.remove("speaking");
-            // Room echo cooldown: Wait 600ms after speaker audio finishes before re-enabling mic
-            if (echoCooldownTimer) clearTimeout(echoCooldownTimer);
-            echoCooldownTimer = setTimeout(() => {
-              isAssistantSpeaking = false;
-              isTutorProcessing = false;
-              currentSpeechText = "";
-              if (isRecording && speechRec) {
-                try { speechRec.start(); } catch (e) {}
-              }
-              updateLiveText("SwaySpeak Tutor Listening...", "SWAY TUTOR");
-            }, 600);
-          };
-          utterance.onend = handleSpeechEnd;
-          utterance.onerror = handleSpeechEnd;
-          window.speechSynthesis.speak(utterance);
-        } catch (synthErr) {
-          console.warn("SpeechSynthesis error:", synthErr);
-          isAssistantSpeaking = false;
-          isTutorProcessing = false;
-        }
-      } else if (!serverPlayedAudio) {
-        isAssistantSpeaking = false;
-        isTutorProcessing = false;
-        if (isRecording && speechRec) {
-          try { speechRec.start(); } catch (e) {}
-        }
+          }
+        }, 1200);
       }
     }
   }
@@ -727,25 +801,14 @@ function handleJSONMessage({ type, content }) {
     serverPlayedAudio = true;
     if (ignoreIncomingTTS) return;
     const int16 = base64ToInt16Array(content);
-    if (!ttsWorkletNode) {
-      ensurePlaybackSystem().then(() => {
-        if (ttsWorkletNode && !ignoreIncomingTTS) {
-          ttsWorkletNode.port.postMessage(int16);
-        }
-      }).catch(() => {});
-      return;
-    }
-    ttsWorkletNode.port.postMessage(int16);
+    playTTSChunk(int16, 24000);
   }
   else if (type === "stop_tts") {
-    if (ttsWorkletNode) ttsWorkletNode.port.postMessage({ type: "clear" });
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    isTTSPlaying = false;
+    stopAllTTSPlayback();
     isAssistantSpeaking = false;
     isTutorProcessing = false;
     ignoreIncomingTTS = true;
     orbContainer.classList.remove("speaking");
-    socket.send(JSON.stringify({ type: 'tts_stop' }));
   }
 }
 

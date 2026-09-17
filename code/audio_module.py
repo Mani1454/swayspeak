@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 DEEPGRAM_TTS_MODEL = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-thalia-en")
 DEEPGRAM_TTS_SAMPLE_RATE = int(os.getenv("DEEPGRAM_TTS_SAMPLE_RATE", "24000"))
-DEEPGRAM_TTS_SPEED = float(os.getenv("DEEPGRAM_TTS_SPEED", "0.88"))
+DEEPGRAM_TTS_SPEED = float(os.getenv("DEEPGRAM_TTS_SPEED", "0.82"))
 
 class AudioProcessor:
     """
