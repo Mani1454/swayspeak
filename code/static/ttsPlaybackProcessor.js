@@ -7,24 +7,28 @@ class TTSPlaybackProcessor extends AudioWorkletProcessor {
     this.fractionalPos = 0.0;
     this.sourceSampleRate = 24000;
     this.isPlaying = false;
-    this.hasStartedSample = false;
-    this.hasPendingSample = false;
+    this.isBuffering = true;
+    this.hasSamplePair = false;
     this.lastSample = 0.0;
     this.nextSample = 0.0;
+    this.silenceFrames = 0;
+
+    // Minimum samples to accumulate before beginning playback (~170ms at 24kHz)
+    this.prebufferSamples = 4096;
 
     // Listen for incoming messages
     this.port.onmessage = (event) => {
       if (event.data && typeof event.data === "object") {
         if (event.data.type === "clear") {
-          // Clear the TTS buffer and reset playback state
           this.bufferQueue = [];
           this.currentChunk = null;
           this.currentChunkIndex = 0;
           this.fractionalPos = 0.0;
-          this.hasStartedSample = false;
-          this.hasPendingSample = false;
+          this.hasSamplePair = false;
           this.lastSample = 0.0;
           this.nextSample = 0.0;
+          this.isBuffering = true;
+          this.silenceFrames = 0;
           if (this.isPlaying) {
             this.isPlaying = false;
             this.port.postMessage({ type: 'ttsPlaybackStopped' });
@@ -46,6 +50,17 @@ class TTSPlaybackProcessor extends AudioWorkletProcessor {
     };
   }
 
+  _getBufferedSampleCount() {
+    let count = 0;
+    if (this.currentChunk && this.currentChunkIndex < this.currentChunk.length) {
+      count += (this.currentChunk.length - this.currentChunkIndex);
+    }
+    for (let i = 0; i < this.bufferQueue.length; i++) {
+      count += this.bufferQueue[i].length;
+    }
+    return count;
+  }
+
   _getNextSourceSample() {
     while (!this.currentChunk || this.currentChunkIndex >= this.currentChunk.length) {
       if (this.bufferQueue.length === 0) {
@@ -62,46 +77,68 @@ class TTSPlaybackProcessor extends AudioWorkletProcessor {
     const outputChannel = outputs[0][0];
     if (!outputChannel) return true;
 
-    // Hardware/context sample rate (e.g., 48000, 96000, 44100)
+    // Exact hardware/context sample rate (e.g., 48000, 44100, 16000)
     const hardwareRate = (typeof sampleRate !== 'undefined' && sampleRate > 0) ? sampleRate : 48000;
     const ratio = this.sourceSampleRate / hardwareRate;
+    const bufferCount = this._getBufferedSampleCount();
 
-    const hasData = (this.currentChunk && this.currentChunkIndex < this.currentChunk.length) || this.bufferQueue.length > 0;
+    // Hangover window: ~300ms of empty buffer before declaring true completion
+    const hangoverThreshold = Math.max(10, Math.floor((0.300 * hardwareRate) / outputChannel.length));
 
-    if (!hasData && !this.hasPendingSample) {
+    // 1. Initial Jitter Pre-buffering
+    if (this.isBuffering) {
+      if (bufferCount >= this.prebufferSamples) {
+        this.isBuffering = false;
+        this.silenceFrames = 0;
+      } else {
+        outputChannel.fill(0);
+        return true;
+      }
+    }
+
+    // 2. Buffer Underrun / Hangover
+    if (bufferCount === 0 && !this.hasSamplePair) {
       outputChannel.fill(0);
-      if (this.isPlaying) {
-        this.isPlaying = false;
-        this.port.postMessage({ type: 'ttsPlaybackStopped' });
+      this.silenceFrames++;
+      if (this.silenceFrames >= hangoverThreshold) {
+        if (this.isPlaying) {
+          this.isPlaying = false;
+          this.isBuffering = true;
+          this.port.postMessage({ type: 'ttsPlaybackStopped' });
+        }
       }
       return true;
     }
 
-    if (!this.isPlaying && (hasData || this.hasPendingSample)) {
+    // Reset silence frames as soon as audio is available
+    this.silenceFrames = 0;
+
+    // 3. Signal playback start
+    if (!this.isPlaying) {
       this.isPlaying = true;
       this.port.postMessage({ type: 'ttsPlaybackStarted' });
     }
 
-    // Initialize first two samples for interpolation
-    if (!this.hasStartedSample) {
+    // 4. Initialize interpolation pair if starting or resuming
+    if (!this.hasSamplePair) {
       const first = this._getNextSourceSample();
       if (first === null) {
         outputChannel.fill(0);
         return true;
       }
-      this.lastSample = first;
       const second = this._getNextSourceSample();
+      this.lastSample = first;
       this.nextSample = second !== null ? second : first;
-      this.hasStartedSample = true;
-      this.hasPendingSample = true;
+      this.hasSamplePair = true;
       this.fractionalPos = 0.0;
     }
 
+    // 5. Linear interpolation resampled to exact hardware DAC clock
     for (let i = 0; i < outputChannel.length; i++) {
       while (this.fractionalPos >= 1.0) {
         const next = this._getNextSourceSample();
         if (next === null) {
-          this.hasPendingSample = false;
+          this.hasSamplePair = false;
           break;
         }
         this.lastSample = this.nextSample;
@@ -109,14 +146,12 @@ class TTSPlaybackProcessor extends AudioWorkletProcessor {
         this.fractionalPos -= 1.0;
       }
 
-      if (this.hasPendingSample) {
-        // High-fidelity linear interpolation resampled to exact hardware clock
+      if (this.hasSamplePair) {
         outputChannel[i] = (1.0 - this.fractionalPos) * this.lastSample + this.fractionalPos * this.nextSample;
         this.fractionalPos += ratio;
       } else {
-        outputChannel[i] = 0;
-        this.hasStartedSample = false;
-        for (let j = i + 1; j < outputChannel.length; j++) {
+        // Smoothly zero out remainder of quantum during temporary starvation
+        for (let j = i; j < outputChannel.length; j++) {
           outputChannel[j] = 0;
         }
         break;

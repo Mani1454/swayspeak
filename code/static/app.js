@@ -321,6 +321,9 @@ function sendUserText(text) {
   if (!text || !text.trim()) return;
   const clean = text.trim();
 
+  // Unlock / prepare audio playback system on user interaction gesture
+  ensurePlaybackSystem().catch(() => {});
+
   // Reset states for the new turn
   serverPlayedAudio = false;
   isTutorProcessing = true;
@@ -467,56 +470,27 @@ function flushBatch() {
   batchBuffer = null;
 }
 
-async function startAudioSystem() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-      }
-    });
-    mediaStream = stream;
-    
-    if (!audioContext) {
-      try {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      } catch (e) {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      }
+async function ensurePlaybackSystem() {
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioContext.state === "suspended") {
+    try {
+      await audioContext.resume();
+    } catch (e) {
+      console.warn("AudioContext resume error:", e);
     }
+  }
 
-    // Sync client sample rate with server so rational resampling perfectly preserves pitch & speed
-    if (socket && socket.readyState === WebSocket.OPEN && audioContext.sampleRate) {
-      socket.send(JSON.stringify({
-        type: 'client_audio_config',
-        sample_rate: audioContext.sampleRate
-      }));
-    }
-    
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 512;
-    const source = audioContext.createMediaStreamSource(stream);
-    source.connect(analyser);
-    dataArray = new Uint8Array(analyser.frequencyBinCount);
+  // Sync client sample rate with server so rational resampling perfectly preserves pitch & speed
+  if (socket && socket.readyState === WebSocket.OPEN && audioContext.sampleRate) {
+    socket.send(JSON.stringify({
+      type: 'client_audio_config',
+      sample_rate: audioContext.sampleRate
+    }));
+  }
 
-    await audioContext.audioWorklet.addModule('/static/pcmWorkletProcessor.js');
-    micWorkletNode = new AudioWorkletNode(audioContext, 'pcm-worklet-processor');
-    micWorkletNode.port.onmessage = ({ data }) => {
-      const incoming = new Int16Array(data);
-      let read = 0;
-      while (read < incoming.length) {
-        initBatch();
-        const toCopy = Math.min(incoming.length - read, BATCH_SAMPLES - batchOffset);
-        batchInt16.set(incoming.subarray(read, read + toCopy), batchOffset);
-        batchOffset += toCopy;
-        read += toCopy;
-        if (batchOffset === BATCH_SAMPLES) flushBatch();
-      }
-    };
-    source.connect(micWorkletNode);
-
+  if (!ttsWorkletNode) {
     await audioContext.audioWorklet.addModule('/static/ttsPlaybackProcessor.js');
     ttsWorkletNode = new AudioWorkletNode(audioContext, 'tts-playback-processor');
     ttsWorkletNode.port.postMessage({ type: 'setSourceSampleRate', sampleRate: 24000 });
@@ -556,6 +530,45 @@ async function startAudioSystem() {
       }
     };
     ttsWorkletNode.connect(audioContext.destination);
+  }
+  return ttsWorkletNode;
+}
+
+async function startAudioSystem() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+    mediaStream = stream;
+    
+    await ensurePlaybackSystem();
+    
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 512;
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    await audioContext.audioWorklet.addModule('/static/pcmWorkletProcessor.js');
+    micWorkletNode = new AudioWorkletNode(audioContext, 'pcm-worklet-processor');
+    micWorkletNode.port.onmessage = ({ data }) => {
+      const incoming = new Int16Array(data);
+      let read = 0;
+      while (read < incoming.length) {
+        initBatch();
+        const toCopy = Math.min(incoming.length - read, BATCH_SAMPLES - batchOffset);
+        batchInt16.set(incoming.subarray(read, read + toCopy), batchOffset);
+        batchOffset += toCopy;
+        read += toCopy;
+        if (batchOffset === BATCH_SAMPLES) flushBatch();
+      }
+    };
+    source.connect(micWorkletNode);
 
   } catch (err) {
     console.error(err);
@@ -572,9 +585,10 @@ function cleanupAudio() {
 
 function base64ToInt16Array(b64) {
   const raw = atob(b64);
-  const buf = new ArrayBuffer(raw.length);
+  const alignedLen = raw.length - (raw.length % 2);
+  const buf = new ArrayBuffer(alignedLen);
   const view = new Uint8Array(buf);
-  for (let i = 0; i < raw.length; i++) view[i] = raw.charCodeAt(i);
+  for (let i = 0; i < alignedLen; i++) view[i] = raw.charCodeAt(i);
   return new Int16Array(buf);
 }
 
@@ -712,8 +726,16 @@ function handleJSONMessage({ type, content }) {
   }
   else if (type === "tts_chunk") {
     serverPlayedAudio = true;
-    if (ignoreIncomingTTS || !ttsWorkletNode) return;
+    if (ignoreIncomingTTS) return;
     const int16 = base64ToInt16Array(content);
+    if (!ttsWorkletNode) {
+      ensurePlaybackSystem().then(() => {
+        if (ttsWorkletNode && !ignoreIncomingTTS) {
+          ttsWorkletNode.port.postMessage(int16);
+        }
+      }).catch(() => {});
+      return;
+    }
     ttsWorkletNode.port.postMessage(int16);
   }
   else if (type === "stop_tts") {

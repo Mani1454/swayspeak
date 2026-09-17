@@ -19,6 +19,8 @@ services:
       - key: DEEPGRAM_STT_MODEL
         value: nova-3
       - key: DEEPGRAM_TTS_MODEL
-        value: aura-asteria-en
+        value: aura-2-thalia-en
+      - key: DEEPGRAM_TTS_SPEED
+        value: "0.88"
       - key: DEEPGRAM_TTS_SAMPLE_RATE
         value: "24000"

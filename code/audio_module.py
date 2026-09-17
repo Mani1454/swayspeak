@@ -31,13 +31,14 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-DEEPGRAM_TTS_MODEL = os.getenv("DEEPGRAM_TTS_MODEL", "aura-asteria-en")
+DEEPGRAM_TTS_MODEL = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-thalia-en")
 DEEPGRAM_TTS_SAMPLE_RATE = int(os.getenv("DEEPGRAM_TTS_SAMPLE_RATE", "24000"))
+DEEPGRAM_TTS_SPEED = float(os.getenv("DEEPGRAM_TTS_SPEED", "0.88"))
 
 class AudioProcessor:
     """
     Manages Text-to-Speech (TTS) synthesis.
-    Cleaned version: Supports Deepgram API only.
+    Cleaned version: Supports Deepgram API only with pacing control.
     """
     def __init__(self, engine: str = "deepgram"):
         """
@@ -56,7 +57,8 @@ class AudioProcessor:
             
             self.deepgram_client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
             self.deepgram_tts_model = DEEPGRAM_TTS_MODEL
-            logger.info(f"🔊 AudioProcessor initialized with Deepgram ({self.deepgram_tts_model})")
+            self.deepgram_tts_speed = DEEPGRAM_TTS_SPEED
+            logger.info(f"🔊 AudioProcessor initialized with Deepgram ({self.deepgram_tts_model}, speed={self.deepgram_tts_speed})")
         else:
             raise ValueError(f"Unsupported engine: {engine}. Only 'deepgram' is supported in this configuration.")
 
@@ -99,15 +101,26 @@ class AudioProcessor:
             return False
 
         try:
-            # Stream directly from Deepgram API
-            stream = self.deepgram_client.speak.v1.audio.generate(
-                text=text,
-                model=self.deepgram_tts_model,
-                encoding="linear16",
-                sample_rate=DEEPGRAM_TTS_SAMPLE_RATE,
-                container="none",
-                request_options={"chunk_size": 4096},
-            )
+            # Stream directly from Deepgram API with speed parameter if supported
+            kwargs = {
+                "text": text,
+                "model": self.deepgram_tts_model,
+                "encoding": "linear16",
+                "sample_rate": DEEPGRAM_TTS_SAMPLE_RATE,
+                "container": "none",
+                "request_options": {"chunk_size": 4096},
+            }
+            if self.deepgram_tts_speed and self.deepgram_tts_speed != 1.0:
+                try:
+                    stream = self.deepgram_client.speak.v1.audio.generate(
+                        **kwargs,
+                        speed=self.deepgram_tts_speed
+                    )
+                except Exception as speed_err:
+                    logger.warning(f"👄⚠️ {generation_string} Speed parameter not supported by model {self.deepgram_tts_model}, falling back without speed: {speed_err}")
+                    stream = self.deepgram_client.speak.v1.audio.generate(**kwargs)
+            else:
+                stream = self.deepgram_client.speak.v1.audio.generate(**kwargs)
         except Exception as e:
             logger.error(f"👄💥 {generation_string} Failed to start Deepgram TTS: {e}")
             return False
