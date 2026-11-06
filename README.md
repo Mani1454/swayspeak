@@ -1,5 +1,8 @@
 # SwaySpeak: Interactive AI English Tutor 🗣️💡
 
+**SwaySpeak continues as [Speak with Sway](https://github.com/Mani1454/speak-with-sway), an English tutor you can talk to face to face.**
+
+
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-swayspeak.onrender.com-brightgreen?style=for-the-badge&logo=render)](https://swayspeak.onrender.com)
 [![GitHub](https://img.shields.io/badge/GitHub-Repository-blue?style=for-the-badge&logo=github)](https://github.com/Mani1454/swayspeak)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python)](https://python.org)
